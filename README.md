@@ -28,6 +28,17 @@
   - safe storage-root resolution (directory traversal guard)
 - Existing M4.2 features preserved (inbox list/get/search, send/reply/retry, staged rollout)
 
+## WASM dispatch safety switch (M5.1)
+
+`email.dispatch` in `wasm-plugin` now forwards calls to host backend execution via WIT host-calls.
+Real IMAP/SMTP execution is **disabled by default** and gated by env:
+
+```bash
+export PRX_EMAIL_ENABLE_REAL_NETWORK=1
+```
+
+When disabled, network tools (`email.sync`, `email.send`, `email.reply`) return a controlled error with guard hint.
+
 ## Quick start (local gates)
 
 ```bash

@@ -21,3 +21,5 @@ max_execution_time_ms = 10000
 
 [config]
 plugin_name = "prx-email"
+# Safety default: disabled. Set to true/1 at runtime env PRX_EMAIL_ENABLE_REAL_NETWORK
+enable_real_network_default = false

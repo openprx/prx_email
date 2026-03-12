@@ -1,5 +1,15 @@
 package prx:plugin@0.1.0;
 
+interface host-calls {
+    record host-result {
+        success: bool,
+        output: string,
+        error: option<string>,
+    }
+
+    execute-tool: func(tool: string, args: string, allow-network: bool) -> host-result;
+}
+
 interface tool-exports {
     record tool-spec {
         name: string,
@@ -18,5 +28,6 @@ interface tool-exports {
 }
 
 world tool {
+    import host-calls;
     export tool-exports;
 }
