@@ -2,8 +2,8 @@ use rusqlite::{params, OptionalExtension};
 use thiserror::Error;
 
 use super::{
-    Account, EmailStore, Folder, Message, NewAccount, NewFolder, NewMessage, NewOutboxMessage,
-    OutboxMessage, SyncState, UpdateOutboxStatus, UpsertSyncState,
+    Account, EmailStore, FeatureFlag, Folder, Message, NewAccount, NewFolder, NewMessage,
+    NewOutboxMessage, OutboxMessage, SyncState, UpdateOutboxStatus, UpsertSyncState,
 };
 
 #[derive(Debug, Error)]
@@ -267,6 +267,125 @@ impl<'a> EmailRepository<'a> {
         )?;
         Ok(())
     }
+
+    pub fn set_feature_default(
+        &self,
+        feature_key: &str,
+        enabled: bool,
+        now_ts: i64,
+    ) -> Result<(), RepoError> {
+        self.store.conn().execute(
+            "UPDATE feature_flags SET default_enabled = ?2, updated_at = ?3 WHERE key = ?1",
+            params![feature_key, bool_to_i64(enabled), now_ts],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_feature_flag(&self, feature_key: &str) -> Result<Option<FeatureFlag>, RepoError> {
+        let result = self
+            .store
+            .conn()
+            .query_row(
+                "SELECT key, description, default_enabled, risk_level, updated_at
+                 FROM feature_flags WHERE key = ?1",
+                params![feature_key],
+                |r| {
+                    Ok(FeatureFlag {
+                        key: r.get(0)?,
+                        description: r.get(1)?,
+                        default_enabled: i64_to_bool(r.get::<_, i64>(2)?),
+                        risk_level: r.get(3)?,
+                        updated_at: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(result)
+    }
+
+    pub fn list_feature_flags(&self) -> Result<Vec<FeatureFlag>, RepoError> {
+        let mut stmt = self.store.conn().prepare(
+            "SELECT key, description, default_enabled, risk_level, updated_at
+             FROM feature_flags ORDER BY key ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(FeatureFlag {
+                key: r.get(0)?,
+                description: r.get(1)?,
+                default_enabled: i64_to_bool(r.get::<_, i64>(2)?),
+                risk_level: r.get(3)?,
+                updated_at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn set_account_feature_flag(
+        &self,
+        account_id: i64,
+        feature_key: &str,
+        enabled: bool,
+        now_ts: i64,
+    ) -> Result<(), RepoError> {
+        self.store.conn().execute(
+            "INSERT INTO account_feature_flags (account_id, feature_key, enabled, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id, feature_key) DO UPDATE SET
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at",
+            params![account_id, feature_key, bool_to_i64(enabled), now_ts],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_account_feature_flag(
+        &self,
+        account_id: i64,
+        feature_key: &str,
+    ) -> Result<(), RepoError> {
+        self.store.conn().execute(
+            "DELETE FROM account_feature_flags WHERE account_id = ?1 AND feature_key = ?2",
+            params![account_id, feature_key],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_feature_enabled(
+        &self,
+        account_id: i64,
+        feature_key: &str,
+    ) -> Result<Option<bool>, RepoError> {
+        let result = self
+            .store
+            .conn()
+            .query_row(
+                "SELECT COALESCE(aff.enabled, ff.default_enabled) AS enabled
+                 FROM feature_flags ff
+                 LEFT JOIN account_feature_flags aff
+                   ON aff.feature_key = ff.key AND aff.account_id = ?1
+                 WHERE ff.key = ?2",
+                params![account_id, feature_key],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(result.map(i64_to_bool))
+    }
+
+    pub fn delete_sent_outbox_before(&self, cutoff_ts: i64) -> Result<usize, RepoError> {
+        let deleted = self.store.conn().execute(
+            "DELETE FROM outbox WHERE status = 'sent' AND updated_at < ?1",
+            params![cutoff_ts],
+        )?;
+        Ok(deleted)
+    }
+
+    pub fn delete_old_messages_before(&self, cutoff_ts: i64) -> Result<usize, RepoError> {
+        let deleted = self.store.conn().execute(
+            "DELETE FROM messages WHERE received_at IS NOT NULL AND received_at < ?1",
+            params![cutoff_ts],
+        )?;
+        Ok(deleted)
+    }
 }
 
 fn map_message(r: &rusqlite::Row<'_>) -> Result<Message, rusqlite::Error> {
@@ -302,4 +421,16 @@ fn map_outbox(r: &rusqlite::Row<'_>) -> Result<OutboxMessage, rusqlite::Error> {
         created_at: r.get(11)?,
         updated_at: r.get(12)?,
     })
+}
+
+fn bool_to_i64(value: bool) -> i64 {
+    if value {
+        1
+    } else {
+        0
+    }
+}
+
+fn i64_to_bool(value: i64) -> bool {
+    value != 0
 }

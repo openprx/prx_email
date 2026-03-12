@@ -126,3 +126,12 @@ pub struct UpdateOutboxStatus {
     pub next_attempt_at: i64,
     pub now_ts: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FeatureFlag {
+    pub key: String,
+    pub description: String,
+    pub default_enabled: bool,
+    pub risk_level: String,
+    pub updated_at: i64,
+}

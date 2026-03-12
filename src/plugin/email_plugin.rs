@@ -10,6 +10,11 @@ const STATUS_SENDING: &str = "sending";
 const STATUS_SENT: &str = "sent";
 const STATUS_FAILED: &str = "failed";
 const BACKOFF_BASE_SECONDS: i64 = 5;
+const FEATURE_INBOX_READ: &str = "inbox_read";
+const FEATURE_INBOX_SEARCH: &str = "inbox_search";
+const FEATURE_EMAIL_SEND: &str = "email_send";
+const FEATURE_EMAIL_REPLY: &str = "email_reply";
+const FEATURE_OUTBOX_RETRY: &str = "outbox_retry";
 
 #[derive(Debug, Clone)]
 pub struct SyncRequest {
@@ -73,6 +78,7 @@ pub enum SendFailureMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ErrorCode {
     Validation,
+    FeatureDisabled,
     Network,
     Provider,
     Storage,
@@ -132,6 +138,7 @@ impl<'a> EmailPlugin<'a> {
 
     /// email.list
     pub fn list(&self, req: ListMessagesRequest) -> Result<Vec<Message>, ApiError> {
+        self.require_feature(req.account_id, FEATURE_INBOX_READ)?;
         self.repo
             .list_messages(req.account_id, req.limit)
             .map_err(storage_err)
@@ -139,6 +146,7 @@ impl<'a> EmailPlugin<'a> {
 
     /// email.get
     pub fn get(&self, req: GetMessageRequest) -> Result<Option<Message>, ApiError> {
+        self.require_feature(req.account_id, FEATURE_INBOX_READ)?;
         self.repo
             .get_message(req.account_id, &req.message_id)
             .map_err(storage_err)
@@ -146,6 +154,7 @@ impl<'a> EmailPlugin<'a> {
 
     /// email.search
     pub fn search(&self, req: SearchMessagesRequest) -> Result<Vec<Message>, ApiError> {
+        self.require_feature(req.account_id, FEATURE_INBOX_SEARCH)?;
         self.repo
             .search_messages(req.account_id, &req.query, req.limit)
             .map_err(storage_err)
@@ -153,6 +162,14 @@ impl<'a> EmailPlugin<'a> {
 
     /// email.send
     pub fn send(&self, req: SendEmailRequest) -> ApiResponse<SendResult> {
+        if let Err(e) = self.require_feature(req.account_id, FEATURE_EMAIL_SEND) {
+            return ApiResponse {
+                ok: false,
+                data: None,
+                error: Some(e),
+            };
+        }
+
         if req.to.trim().is_empty()
             || req.subject.trim().is_empty()
             || req.body_text.trim().is_empty()
@@ -184,6 +201,14 @@ impl<'a> EmailPlugin<'a> {
 
     /// email.reply
     pub fn reply(&self, req: ReplyEmailRequest) -> ApiResponse<SendResult> {
+        if let Err(e) = self.require_feature(req.account_id, FEATURE_EMAIL_REPLY) {
+            return ApiResponse {
+                ok: false,
+                data: None,
+                error: Some(e),
+            };
+        }
+
         if req.in_reply_to_message_id.trim().is_empty() || req.body_text.trim().is_empty() {
             return fail(
                 ErrorCode::Validation,
@@ -240,11 +265,71 @@ impl<'a> EmailPlugin<'a> {
 
     /// Manual retry trigger for failed/pending outbox records.
     pub fn retry_outbox(&self, req: RetryOutboxRequest) -> ApiResponse<SendResult> {
+        let account_id = match self.repo.get_outbox_message(req.outbox_id) {
+            Ok(Some(outbox)) => outbox.account_id,
+            Ok(None) => return fail(ErrorCode::Validation, "outbox record not found"),
+            Err(e) => return fail(ErrorCode::Storage, &e.to_string()),
+        };
+        if let Err(e) = self.require_feature(account_id, FEATURE_OUTBOX_RETRY) {
+            return ApiResponse {
+                ok: false,
+                data: None,
+                error: Some(e),
+            };
+        }
+
         self.deliver_outbox(req.outbox_id, req.now_ts, req.failure_mode)
     }
 
     pub fn get_outbox(&self, outbox_id: i64) -> Result<Option<OutboxMessage>, ApiError> {
         self.repo.get_outbox_message(outbox_id).map_err(storage_err)
+    }
+
+    pub fn set_feature_default(
+        &self,
+        feature_key: &str,
+        enabled: bool,
+        now_ts: i64,
+    ) -> Result<(), ApiError> {
+        self.repo
+            .set_feature_default(feature_key, enabled, now_ts)
+            .map_err(storage_err)
+    }
+
+    pub fn set_account_feature(
+        &self,
+        account_id: i64,
+        feature_key: &str,
+        enabled: bool,
+        now_ts: i64,
+    ) -> Result<(), ApiError> {
+        self.repo
+            .set_account_feature_flag(account_id, feature_key, enabled, now_ts)
+            .map_err(storage_err)
+    }
+
+    pub fn apply_percentage_rollout(
+        &self,
+        account_id: i64,
+        feature_key: &str,
+        percentage: u8,
+        now_ts: i64,
+    ) -> Result<bool, ApiError> {
+        let bounded = percentage.min(100);
+        let bucket = account_id.rem_euclid(100) as u8;
+        let enabled = bucket < bounded;
+        self.set_account_feature(account_id, feature_key, enabled, now_ts)?;
+        Ok(enabled)
+    }
+
+    pub fn is_feature_enabled(&self, account_id: i64, feature_key: &str) -> Result<bool, ApiError> {
+        self.repo
+            .is_feature_enabled(account_id, feature_key)
+            .map_err(storage_err)?
+            .ok_or_else(|| ApiError {
+                code: ErrorCode::Validation,
+                message: format!("unknown feature flag: {}", feature_key),
+            })
     }
 
     fn deliver_outbox(
@@ -329,6 +414,27 @@ impl<'a> EmailPlugin<'a> {
                     }),
                 }
             }
+        }
+    }
+
+    fn require_feature(&self, account_id: i64, feature_key: &str) -> Result<(), ApiError> {
+        match self
+            .repo
+            .is_feature_enabled(account_id, feature_key)
+            .map_err(storage_err)?
+        {
+            Some(true) => Ok(()),
+            Some(false) => Err(ApiError {
+                code: ErrorCode::FeatureDisabled,
+                message: format!(
+                    "feature '{}' is disabled for account {}",
+                    feature_key, account_id
+                ),
+            }),
+            None => Err(ApiError {
+                code: ErrorCode::Validation,
+                message: format!("unknown feature flag: {}", feature_key),
+            }),
         }
     }
 }

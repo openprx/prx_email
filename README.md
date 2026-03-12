@@ -1,41 +1,26 @@
 # prx_email
 
-`prx_email` is a Rust-based email plugin foundation for PRX.
-Current implementation is **SQLite-only** and focuses on core local data capabilities.
+`prx_email` is a Rust email plugin for PRX with a **SQLite-only M3** implementation focused on operational safety and staged rollout.
 
-## What it does now
+## M3 capabilities
 
-- Creates local email storage via SQLite migrations
-- Provides basic data models and repositories for:
-  - `accounts`
-  - `folders`
-  - `messages`
-  - `sync_state`
-- Exposes plugin operation skeletons for:
-  - `email.sync`
-  - `email.list`
-  - `email.get`
-  - `email.search`
-- Includes smoke tests to verify schema/repository/plugin flow compiles and runs
+- Inbox operations: `email.list`, `email.get`, `email.search`
+- Send/reply/outbox retry flows with deterministic provider stub for regression testing
+- SQLite migrations for core schema, outbox, and feature-flag rollout controls
+- Staged feature rollout model (global defaults + per-account overrides + deterministic percentage rollout)
+- Safe defaults for high-risk actions: `email_send`, `email_reply`, `outbox_retry` are disabled by default
 
 ## Quick start
 
 ```bash
-# run tests
+# required local gates
+cargo check
 cargo test
-
-# build
 cargo build
+cargo clippy -- -D warnings
 ```
 
-## Project structure
+## Operations docs
 
-- `migrations/0001_init.sql` — initial SQLite schema
-- `src/db/` — models, storage, repositories
-- `src/plugin/` — email operation skeletons
-- `tests/m1_smoke.rs` — basic smoke test
-
-## Current status
-
-This repository currently provides the M1 foundation and local persistence layer.
-Sending/receiving real email transport integration is not enabled yet.
+- [Operations Runbook](docs/operations_runbook.md)
+- [Performance & Capacity](docs/performance_capacity.md)
