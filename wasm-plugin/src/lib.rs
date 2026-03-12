@@ -27,6 +27,11 @@ struct HostResult {
 pub struct EmailTool;
 
 const ENABLE_REAL_NETWORK_ENV: &str = "PRX_EMAIL_ENABLE_REAL_NETWORK";
+const ERR_UNSUPPORTED_TOOL: &str = "EMAIL_UNSUPPORTED_TOOL";
+const ERR_VALIDATION: &str = "EMAIL_VALIDATION";
+const ERR_REAL_NETWORK_DISABLED: &str = "EMAIL_REAL_NETWORK_DISABLED";
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const ERR_HOST_CAPABILITY_UNAVAILABLE: &str = "EMAIL_HOST_CAPABILITY_UNAVAILABLE";
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 #[derive(Debug, Deserialize)]
@@ -59,12 +64,31 @@ impl HostExecutor for WasmHostExecutor {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct NoopHostExecutor;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HostExecutor for NoopHostExecutor {
+    fn execute_tool(&self, _tool: &str, _args_json: &str, _allow_network: bool) -> HostResult {
+        HostResult {
+            success: false,
+            output: serde_json::json!({
+                "ok": false,
+                "error_code": ERR_HOST_CAPABILITY_UNAVAILABLE,
+                "hint": "host-calls.execute-tool is only available after plugin.wasm is loaded by PRX runtime"
+            })
+            .to_string(),
+            error: Some("host capability execute-tool unavailable in non-wasm runtime".to_string()),
+        }
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 impl EmailTool {
     fn get_spec_impl() -> ToolSpec {
         ToolSpec {
-            name: "email.dispatch".to_string(),
-            description: "PRX email tool dispatcher. Supported tools: email.sync, email.list, email.get, email.search, email.send, email.reply".to_string(),
+            name: "email.execute".to_string(),
+            description: "PRX email executor. Supported tools: email.sync, email.list, email.get, email.search, email.send, email.reply".to_string(),
             parameters_schema: r#"{
   "type": "object",
   "properties": {
@@ -94,12 +118,7 @@ impl EmailTool {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let _ = args_json;
-            PluginResult {
-                success: false,
-                output: String::new(),
-                error: Some("execute() is only available in wasm runtime".to_string()),
-            }
+            Self::execute_with(args_json, &NoopHostExecutor)
         }
     }
 
@@ -107,28 +126,16 @@ impl EmailTool {
         let args: DispatchArgs = match serde_json::from_str(args_json) {
             Ok(v) => v,
             Err(e) => {
-                return PluginResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("invalid json args: {e}")),
-                }
+                return controlled_error(ERR_VALIDATION, format!("invalid json args: {e}"));
             }
         };
 
         if !is_supported_tool(&args.tool) {
-            return PluginResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("unsupported tool: {}", args.tool)),
-            };
+            return controlled_error(ERR_UNSUPPORTED_TOOL, format!("unsupported tool: {}", args.tool));
         }
 
         if let Some(msg) = validate_required_fields(&args) {
-            return PluginResult {
-                success: false,
-                output: String::new(),
-                error: Some(msg),
-            };
+            return controlled_error(ERR_VALIDATION, msg);
         }
 
         let allow_network = is_real_network_enabled();
@@ -138,6 +145,7 @@ impl EmailTool {
                 output: serde_json::json!({
                     "tool": args.tool,
                     "ok": false,
+                    "error_code": ERR_REAL_NETWORK_DISABLED,
                     "guard": "real-network-disabled",
                     "hint": format!("Set {ENABLE_REAL_NETWORK_ENV}=1 to enable real IMAP/SMTP execution")
                 })
@@ -152,6 +160,19 @@ impl EmailTool {
             output: host_out.output,
             error: host_out.error,
         }
+    }
+}
+
+fn controlled_error(code: &str, message: String) -> PluginResult {
+    PluginResult {
+        success: false,
+        output: serde_json::json!({
+            "ok": false,
+            "error_code": code,
+            "message": message,
+        })
+        .to_string(),
+        error: Some(message),
     }
 }
 
@@ -299,6 +320,7 @@ mod tests {
     #[test]
     fn spec_contains_required_tools() {
         let spec = EmailTool::get_spec_impl();
+        assert_eq!(spec.name, "email.execute");
         assert!(spec.parameters_schema.contains("email.sync"));
         assert!(spec.parameters_schema.contains("email.list"));
         assert!(spec.parameters_schema.contains("email.get"));

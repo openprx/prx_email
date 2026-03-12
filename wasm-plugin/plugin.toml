@@ -7,8 +7,8 @@ wasm = "plugin.wasm"
 
 [[capabilities]]
 type = "tool"
-name = "email.dispatch"
-description = "Dispatch email.sync/list/get/search/send/reply"
+name = "email.execute"
+description = "Execute email.sync/list/get/search/send/reply"
 
 [permissions]
 required = ["log", "config"]
