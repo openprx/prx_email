@@ -2,7 +2,7 @@
 
 ## Scope
 
-This runbook is for operating `prx_email` M3 in production with SQLite persistence.
+This runbook is for operating `prx_email` M4.2 in production with SQLite persistence.
 
 ## Configuration
 
@@ -24,6 +24,38 @@ If needed, create the store with explicit options via `StoreConfig`:
 Recommended defaults for production are the current defaults in `StoreConfig::default()`.
 
 ## M4.1 Operational Notes
+
+## M4.2 Auth & Security Closure
+
+### Unified auth config (IMAP + SMTP)
+
+Both transports use the same auth schema:
+
+- `auth.password`
+- `auth.oauth_token`
+
+Exactly one must be set for each protocol.
+
+### Startup validation
+
+`EmailPlugin::new_with_config` and runtime sync/send paths validate transport config before network calls:
+
+- host/user required
+- exactly one auth method required
+
+Validation errors are human-readable and do not include raw credentials/tokens.
+
+### Security logging
+
+Failure logs now redact recipient mailbox in debug lines and never log raw `password`/`oauth_token`.
+
+### Error grading
+
+Provider/network errors are split into:
+
+- user-facing message (safe, concise)
+- debug detail (captured in server logs for tracing)
+
 
 ### Reply threading (`References`)
 

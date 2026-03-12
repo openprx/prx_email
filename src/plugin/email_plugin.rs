@@ -1,7 +1,11 @@
 use base64::Engine;
 use imap::types::Fetch;
+use imap::Authenticator;
 use lettre::message::{header::ContentType, Attachment, Mailbox, Message as SmtpMessage, MultiPart, SinglePart};
-use lettre::{transport::smtp::authentication::Credentials, SmtpTransport, Transport};
+use lettre::{
+    transport::smtp::authentication::{Credentials, Mechanism},
+    SmtpTransport, Transport,
+};
 use mail_parser::{Address, MessageParser, MimeHeaders};
 use rustls_connector::RustlsConnector;
 use serde::{Deserialize, Serialize};
@@ -26,11 +30,17 @@ const FEATURE_EMAIL_REPLY: &str = "email_reply";
 const FEATURE_OUTBOX_RETRY: &str = "outbox_retry";
 
 #[derive(Debug, Clone)]
+pub struct AuthConfig {
+    pub password: Option<String>,
+    pub oauth_token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ImapConfig {
     pub host: String,
     pub port: u16,
     pub user: String,
-    pub pass: String,
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +48,7 @@ pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
     pub user: String,
-    pub pass: String,
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +176,9 @@ impl<'a> EmailPlugin<'a> {
     }
 
     pub fn new_with_config(repo: EmailRepository<'a>, config: EmailTransportConfig) -> Self {
+        if let Err(err) = validate_transport_config(&config) {
+            log_debug("transport config validation failed", &err.message);
+        }
         Self {
             repo,
             config: Some(config),
@@ -177,14 +190,13 @@ impl<'a> EmailPlugin<'a> {
             code: ErrorCode::Validation,
             message: "imap/smtp config missing".to_string(),
         })?;
+        validate_transport_config(cfg)?;
 
         let tls = RustlsConnector::default();
         let tcp = TcpStream::connect((cfg.imap.host.as_str(), cfg.imap.port)).map_err(network_err)?;
         let tls_stream = tls.connect(&cfg.imap.host, tcp).map_err(network_err)?;
         let client = imap::Client::new(tls_stream);
-        let mut session = client
-            .login(&cfg.imap.user, &cfg.imap.pass)
-            .map_err(|e| network_err(e.0))?;
+        let mut session = imap_login(client, &cfg.imap)?;
         let folder_path = req.folder.unwrap_or_else(|| "INBOX".to_string());
         session.select(&folder_path).map_err(network_err)?;
 
@@ -481,6 +493,16 @@ impl<'a> EmailPlugin<'a> {
                     SendFailureMode::Provider => ErrorCode::Provider,
                 };
 
+                log_debug(
+                    "outbox send failed",
+                    &format!(
+                        "account={} to={} err={} debug={}",
+                        outbox.account_id,
+                        redact_email(&outbox.to_recipients),
+                        provider_err.message,
+                        provider_err.debug_message
+                    ),
+                );
                 if let Err(e) = self.repo.update_outbox_status(&UpdateOutboxStatus {
                     id: outbox_id,
                     status: STATUS_FAILED.to_string(),
@@ -522,21 +544,24 @@ impl<'a> EmailPlugin<'a> {
                 SendFailureMode::Network => "simulated network timeout".to_string(),
                 SendFailureMode::Provider => "simulated provider rejection".to_string(),
             };
-            return Err(ProviderError { mode, message });
+            return Err(ProviderError { mode, message, debug_message: "simulated failure".to_string() });
         }
 
         let cfg = self.config.as_ref().ok_or_else(|| ProviderError {
             mode: SendFailureMode::Provider,
             message: "smtp config missing".to_string(),
+            debug_message: "smtp transport config is None".to_string(),
         })?;
 
         let from = Mailbox::new(None, cfg.smtp.user.parse().map_err(|e| ProviderError {
             mode: SendFailureMode::Provider,
-            message: format!("invalid smtp user address: {e}"),
+            message: "invalid smtp sender address".to_string(),
+            debug_message: format!("invalid smtp user address: {e}"),
         })?);
         let to = Mailbox::new(None, outbox.to_recipients.parse().map_err(|e| ProviderError {
             mode: SendFailureMode::Provider,
-            message: format!("invalid recipient address: {e}"),
+            message: "invalid recipient address".to_string(),
+            debug_message: format!("invalid recipient address: {e}"),
         })?);
 
         let mut msg_builder = SmtpMessage::builder()
@@ -568,11 +593,33 @@ impl<'a> EmailPlugin<'a> {
             msg_builder.singlepart(body).map_err(provider_err)?
         };
 
-        let mailer = SmtpTransport::relay(&cfg.smtp.host)
+        validate_transport_config(cfg).map_err(|err| ProviderError {
+            mode: SendFailureMode::Provider,
+            message: err.message.clone(),
+            debug_message: format!("transport config invalid: {}", err.message),
+        })?;
+
+        let mut builder = SmtpTransport::relay(&cfg.smtp.host)
             .map_err(provider_err)?
-            .port(cfg.smtp.port)
-            .credentials(Credentials::new(cfg.smtp.user.clone(), cfg.smtp.pass.clone()))
-            .build();
+            .port(cfg.smtp.port);
+        match (&cfg.smtp.auth.password, &cfg.smtp.auth.oauth_token) {
+            (Some(password), None) => {
+                builder = builder.credentials(Credentials::new(cfg.smtp.user.clone(), password.clone()));
+            }
+            (None, Some(token)) => {
+                builder = builder
+                    .authentication(vec![Mechanism::Xoauth2])
+                    .credentials(Credentials::new(cfg.smtp.user.clone(), token.clone()));
+            }
+            _ => {
+                return Err(ProviderError {
+                    mode: SendFailureMode::Provider,
+                    message: "smtp auth must set exactly one of password/oauth_token".to_string(),
+                    debug_message: "smtp auth config invalid".to_string(),
+                });
+            }
+        }
+        let mailer = builder.build();
 
         let response = mailer.send(&message).map_err(network_err_provider)?;
         let provider_id = response.message().collect::<Vec<_>>().join(" ");
@@ -602,6 +649,7 @@ impl<'a> EmailPlugin<'a> {
 struct ProviderError {
     mode: SendFailureMode,
     message: String,
+    debug_message: String,
 }
 
 fn read_attachment_bytes(input: &AttachmentInput) -> Result<Vec<u8>, ProviderError> {
@@ -613,6 +661,7 @@ fn read_attachment_bytes(input: &AttachmentInput) -> Result<Vec<u8>, ProviderErr
         _ => Err(ProviderError {
             mode: SendFailureMode::Provider,
             message: "attachment requires exactly one of base64 or path".to_string(),
+            debug_message: "attachment input has both/none of base64/path".to_string(),
         }),
     }
 }
@@ -870,15 +919,83 @@ fn network_err(e: impl std::fmt::Display) -> ApiError {
 fn provider_err(e: impl std::fmt::Display) -> ProviderError {
     ProviderError {
         mode: SendFailureMode::Provider,
-        message: e.to_string(),
+        message: "provider rejected the request".to_string(),
+        debug_message: e.to_string(),
     }
 }
 
 fn network_err_provider(e: impl std::fmt::Display) -> ProviderError {
     ProviderError {
         mode: SendFailureMode::Network,
-        message: e.to_string(),
+        message: "network error while contacting provider".to_string(),
+        debug_message: e.to_string(),
     }
+}
+
+fn validate_transport_config(cfg: &EmailTransportConfig) -> Result<(), ApiError> {
+    if cfg.imap.host.trim().is_empty() || cfg.smtp.host.trim().is_empty() {
+        return Err(ApiError { code: ErrorCode::Validation, message: "imap/smtp host is required".to_string() });
+    }
+    validate_auth_config("imap", &cfg.imap.user, &cfg.imap.auth)?;
+    validate_auth_config("smtp", &cfg.smtp.user, &cfg.smtp.auth)?;
+    Ok(())
+}
+
+fn validate_auth_config(protocol: &str, user: &str, auth: &AuthConfig) -> Result<(), ApiError> {
+    if user.trim().is_empty() {
+        return Err(ApiError { code: ErrorCode::Validation, message: format!("{protocol}.user is required") });
+    }
+    match (&auth.password, &auth.oauth_token) {
+        (Some(_), None) | (None, Some(_)) => Ok(()),
+        _ => Err(ApiError { code: ErrorCode::Validation, message: format!("{protocol}.auth must set exactly one of password/oauth_token") }),
+    }
+}
+
+struct Xoauth2Authenticator {
+    payload: String,
+}
+
+impl Authenticator for Xoauth2Authenticator {
+    type Response = String;
+
+    fn process(&self, _challenge: &[u8]) -> Self::Response {
+        self.payload.clone()
+    }
+}
+
+fn imap_login(
+    client: imap::Client<rustls_connector::TlsStream<TcpStream>>,
+    cfg: &ImapConfig,
+) -> Result<imap::Session<rustls_connector::TlsStream<TcpStream>>, ApiError> {
+    match (&cfg.auth.password, &cfg.auth.oauth_token) {
+        (Some(password), None) => client
+            .login(&cfg.user, password)
+            .map_err(|e| network_err(e.0)),
+        (None, Some(token)) => {
+            let authenticator = Xoauth2Authenticator {
+                payload: format!("user={}\x01auth=Bearer {}\x01\x01", cfg.user, token),
+            };
+            client
+                .authenticate("XOAUTH2", &authenticator)
+                .map_err(|e| network_err(e.0))
+        }
+        _ => Err(ApiError {
+            code: ErrorCode::Validation,
+            message: "imap.auth must set exactly one of password/oauth_token".to_string(),
+        }),
+    }
+}
+
+fn redact_email(value: &str) -> String {
+    if let Some((local, domain)) = value.split_once('@') {
+        let local_head = local.chars().next().unwrap_or('*');
+        return format!("{}***@{}", local_head, domain);
+    }
+    "***".to_string()
+}
+
+fn log_debug(context: &str, details: &str) {
+    eprintln!("[prx_email][debug] {} | {}", context, details);
 }
 
 #[cfg(test)]

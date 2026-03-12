@@ -2,10 +2,15 @@
 
 `prx_email` is a Rust email plugin for PRX with a **SQLite-first M4.1** implementation focused on operational safety, staged rollout, and practical inbox threading.
 
-## M4.1 capabilities
+## M4.2 capabilities
 
 - Inbox operations: `email.list`, `email.get`, `email.search`
 - Send/reply/outbox retry flows with deterministic provider stub for regression testing
+- Unified auth model for IMAP/SMTP: exactly one of `password` or `oauth_token`
+- OAuth2 token auth support for IMAP/SMTP (while preserving user/password compatibility)
+- Startup-time transport config validation with readable, non-secret error messages
+- Sensitive log redaction for email identifiers and auth-secret related failures
+- Error grading: user-facing failure text + debug-only diagnostics in logs
 - Reply threading enhancement: outbound reply now sets both `In-Reply-To` and `References` chain (`parent References + parent Message-ID`)
 - Multi-folder sync: `email.sync` supports configurable folders (`INBOX`, `Sent`, etc.) and keeps sync cursor per folder
 - Attachment local persistence (optional): received attachments can be stored on disk, and metadata includes `local_path`
@@ -33,7 +38,10 @@ export E2E_IMAP_PORT=993
 export E2E_SMTP_HOST=smtp.example.com
 export E2E_SMTP_PORT=465
 export E2E_EMAIL_USER=bot@example.com
+# Auth mode A: user/password
 export E2E_EMAIL_PASS='***'
+# Auth mode B: OAuth2 token (set this instead of E2E_EMAIL_PASS)
+# export E2E_OAUTH_TOKEN='ya29....'
 export E2E_TARGET_EMAIL=bot@example.com # optional, defaults to E2E_EMAIL_USER
 
 ./tests/run_e2e_smoke.sh

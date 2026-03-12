@@ -1,7 +1,7 @@
 use prx_email::db::{EmailRepository, EmailStore, NewAccount};
 use prx_email::plugin::{
     EmailPlugin, EmailTransportConfig, ImapConfig, ReplyEmailRequest, SendEmailRequest, SmtpConfig,
-    SyncRequest,
+    SyncRequest, AuthConfig,
 };
 
 #[test]
@@ -18,7 +18,9 @@ fn e2e_sync_send_reply_smoke() {
         .parse()
         .expect("E2E_SMTP_PORT");
     let user = std::env::var("E2E_EMAIL_USER").expect("E2E_EMAIL_USER");
-    let pass = std::env::var("E2E_EMAIL_PASS").expect("E2E_EMAIL_PASS");
+    let password = std::env::var("E2E_EMAIL_PASS").ok();
+    let oauth_token = std::env::var("E2E_OAUTH_TOKEN").ok();
+    assert!(password.is_some() ^ oauth_token.is_some(), "set exactly one of E2E_EMAIL_PASS / E2E_OAUTH_TOKEN");
     let target = std::env::var("E2E_TARGET_EMAIL").unwrap_or_else(|_| user.clone());
 
     let now = 1_800_000_000i64;
@@ -40,13 +42,19 @@ fn e2e_sync_send_reply_smoke() {
                 host: imap_host,
                 port: imap_port,
                 user: user.clone(),
-                pass: pass.clone(),
+                auth: AuthConfig {
+                    password: password.clone(),
+                    oauth_token: oauth_token.clone(),
+                },
             },
             smtp: SmtpConfig {
                 host: smtp_host,
                 port: smtp_port,
                 user: user.clone(),
-                pass,
+                auth: AuthConfig {
+                    password,
+                    oauth_token,
+                },
             },
             attachment_store: None,
         },
