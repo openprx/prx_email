@@ -184,7 +184,7 @@ impl<'a> EmailPlugin<'a> {
             .as_deref()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0);
-        let uid_criteria = format!("{}:*", start_uid.saturating_add(1));
+        let uid_criteria = format!("UID {}:*", start_uid.saturating_add(1));
         let mut uids: Vec<u32> = session
             .uid_search(uid_criteria)
             .map_err(network_err)?
@@ -605,17 +605,11 @@ fn parse_mime_message(raw: &[u8]) -> Option<ParsedMime> {
         .text_bodies()
         .find_map(|p| p.text_contents().map(|v| v.to_string()))
         .or_else(|| message.body_text(0).map(|v| v.into_owned()));
-    let mut body_html = message
+    let body_html = message
         .html_bodies()
         .find_map(|p| p.text_contents().map(|v| v.to_string()))
         .or_else(|| message.body_html(0).map(|v| v.into_owned()))
         .or_else(|| extract_html_part_from_raw(raw));
-    if body_html.is_none()
-        && let Ok(raw_text) = std::str::from_utf8(raw)
-        && raw_text.contains("Content-Type: text/html")
-    {
-        body_html = Some(raw_text.to_string());
-    }
     let snippet = body_text
         .as_ref()
         .map(|v| v.chars().take(120).collect::<String>())
