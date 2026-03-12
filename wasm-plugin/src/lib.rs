@@ -16,22 +16,13 @@ struct PluginResult {
     error: Option<String>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-#[derive(Debug, Clone)]
-struct HostResult {
-    success: bool,
-    output: String,
-    error: Option<String>,
-}
-
 pub struct EmailTool;
 
 const ENABLE_REAL_NETWORK_ENV: &str = "PRX_EMAIL_ENABLE_REAL_NETWORK";
 const ERR_UNSUPPORTED_TOOL: &str = "EMAIL_UNSUPPORTED_TOOL";
 const ERR_VALIDATION: &str = "EMAIL_VALIDATION";
 const ERR_REAL_NETWORK_DISABLED: &str = "EMAIL_REAL_NETWORK_DISABLED";
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-const ERR_HOST_CAPABILITY_UNAVAILABLE: &str = "EMAIL_HOST_CAPABILITY_UNAVAILABLE";
+const ERR_NOT_IMPLEMENTED: &str = "EMAIL_NOT_IMPLEMENTED";
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 #[derive(Debug, Deserialize)]
@@ -43,44 +34,6 @@ struct DispatchArgs {
     to: Option<String>,
     subject: Option<String>,
     body_text: Option<String>,
-}
-
-trait HostExecutor {
-    fn execute_tool(&self, tool: &str, args_json: &str, allow_network: bool) -> HostResult;
-}
-
-#[cfg(target_arch = "wasm32")]
-struct WasmHostExecutor;
-
-#[cfg(target_arch = "wasm32")]
-impl HostExecutor for WasmHostExecutor {
-    fn execute_tool(&self, tool: &str, args_json: &str, allow_network: bool) -> HostResult {
-        let out = crate::bindings::prx::plugin::host_calls::execute_tool(tool, args_json, allow_network);
-        HostResult {
-            success: out.success,
-            output: out.output,
-            error: out.error,
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct NoopHostExecutor;
-
-#[cfg(not(target_arch = "wasm32"))]
-impl HostExecutor for NoopHostExecutor {
-    fn execute_tool(&self, _tool: &str, _args_json: &str, _allow_network: bool) -> HostResult {
-        HostResult {
-            success: false,
-            output: serde_json::json!({
-                "ok": false,
-                "error_code": ERR_HOST_CAPABILITY_UNAVAILABLE,
-                "hint": "host-calls.execute-tool is only available after plugin.wasm is loaded by PRX runtime"
-            })
-            .to_string(),
-            error: Some("host capability execute-tool unavailable in non-wasm runtime".to_string()),
-        }
-    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -111,18 +64,6 @@ impl EmailTool {
     }
 
     fn execute_impl(args_json: &str) -> PluginResult {
-        #[cfg(target_arch = "wasm32")]
-        {
-            return Self::execute_with(args_json, &WasmHostExecutor);
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            Self::execute_with(args_json, &NoopHostExecutor)
-        }
-    }
-
-    fn execute_with(args_json: &str, host: &dyn HostExecutor) -> PluginResult {
         let args: DispatchArgs = match serde_json::from_str(args_json) {
             Ok(v) => v,
             Err(e) => {
@@ -131,7 +72,10 @@ impl EmailTool {
         };
 
         if !is_supported_tool(&args.tool) {
-            return controlled_error(ERR_UNSUPPORTED_TOOL, format!("unsupported tool: {}", args.tool));
+            return controlled_error(
+                ERR_UNSUPPORTED_TOOL,
+                format!("unsupported tool: {}", args.tool),
+            );
         }
 
         if let Some(msg) = validate_required_fields(&args) {
@@ -139,26 +83,17 @@ impl EmailTool {
         }
 
         let allow_network = is_real_network_enabled();
-        if !allow_network && requires_network(&args.tool) {
-            return PluginResult {
-                success: false,
-                output: serde_json::json!({
-                    "tool": args.tool,
-                    "ok": false,
-                    "error_code": ERR_REAL_NETWORK_DISABLED,
-                    "guard": "real-network-disabled",
-                    "hint": format!("Set {ENABLE_REAL_NETWORK_ENV}=1 to enable real IMAP/SMTP execution")
-                })
-                .to_string(),
-                error: Some("real network execution disabled by policy".to_string()),
-            };
-        }
-
-        let host_out = host.execute_tool(&args.tool, args_json, allow_network);
-        PluginResult {
-            success: host_out.success,
-            output: host_out.output,
-            error: host_out.error,
+        match args.tool.as_str() {
+            "email.sync" => execute_sync(&args, allow_network),
+            "email.list" => execute_list(&args),
+            "email.get" => execute_get(&args),
+            "email.search" => execute_search(&args),
+            "email.send" => execute_send(&args, allow_network),
+            "email.reply" => execute_reply(&args, allow_network),
+            _ => controlled_error(
+                ERR_UNSUPPORTED_TOOL,
+                format!("unsupported tool: {}", args.tool),
+            ),
         }
     }
 }
@@ -176,9 +111,110 @@ fn controlled_error(code: &str, message: String) -> PluginResult {
     }
 }
 
+fn controlled_success(value: serde_json::Value) -> PluginResult {
+    PluginResult {
+        success: true,
+        output: value.to_string(),
+        error: None,
+    }
+}
+
+fn guard_real_network(tool: &str) -> PluginResult {
+    PluginResult {
+        success: false,
+        output: serde_json::json!({
+            "tool": tool,
+            "ok": false,
+            "error_code": ERR_REAL_NETWORK_DISABLED,
+            "guard": "real-network-disabled",
+            "hint": format!("Set {ENABLE_REAL_NETWORK_ENV}=1 to enable real IMAP/SMTP execution")
+        })
+        .to_string(),
+        error: Some("real network execution disabled by policy".to_string()),
+    }
+}
+
+fn execute_sync(args: &DispatchArgs, allow_network: bool) -> PluginResult {
+    if !allow_network {
+        return guard_real_network(&args.tool);
+    }
+
+    controlled_error(
+        ERR_NOT_IMPLEMENTED,
+        "email.sync is routed but real network execution is intentionally not implemented in wasm-plugin".to_string(),
+    )
+}
+
+fn execute_list(args: &DispatchArgs) -> PluginResult {
+    controlled_success(serde_json::json!({
+        "ok": true,
+        "tool": args.tool,
+        "account_id": args.account_id,
+        "items": [],
+        "source": "controlled-result"
+    }))
+}
+
+fn execute_get(args: &DispatchArgs) -> PluginResult {
+    controlled_success(serde_json::json!({
+        "ok": true,
+        "tool": args.tool,
+        "account_id": args.account_id,
+        "message": {
+            "id": args.message_id,
+            "subject": null,
+            "from": null,
+            "snippet": null
+        },
+        "source": "controlled-result"
+    }))
+}
+
+fn execute_search(args: &DispatchArgs) -> PluginResult {
+    controlled_success(serde_json::json!({
+        "ok": true,
+        "tool": args.tool,
+        "account_id": args.account_id,
+        "query": args.query,
+        "items": [],
+        "source": "controlled-result"
+    }))
+}
+
+fn execute_send(args: &DispatchArgs, allow_network: bool) -> PluginResult {
+    if !allow_network {
+        return guard_real_network(&args.tool);
+    }
+
+    controlled_error(
+        ERR_NOT_IMPLEMENTED,
+        format!(
+            "{} is routed but send is intentionally blocked in wasm-plugin",
+            args.tool
+        ),
+    )
+}
+
+fn execute_reply(args: &DispatchArgs, allow_network: bool) -> PluginResult {
+    if !allow_network {
+        return guard_real_network(&args.tool);
+    }
+
+    controlled_error(
+        ERR_NOT_IMPLEMENTED,
+        format!(
+            "{} is routed but send is intentionally blocked in wasm-plugin",
+            args.tool
+        ),
+    )
+}
+
 fn is_real_network_enabled() -> bool {
     match std::env::var(ENABLE_REAL_NETWORK_ENV) {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
         Err(_) => false,
     }
 }
@@ -188,10 +224,6 @@ fn is_supported_tool(tool: &str) -> bool {
         tool,
         "email.sync" | "email.list" | "email.get" | "email.search" | "email.send" | "email.reply"
     )
-}
-
-fn requires_network(tool: &str) -> bool {
-    matches!(tool, "email.sync" | "email.send" | "email.reply")
 }
 
 fn validate_required_fields(args: &DispatchArgs) -> Option<String> {
@@ -248,7 +280,9 @@ mod bindings {
 #[cfg(target_arch = "wasm32")]
 mod wasm_exports {
     use super::{EmailTool, PluginResult, ToolSpec};
-    use crate::bindings::exports::prx::plugin::tool_exports::{Guest, PluginResult as WitPluginResult, ToolSpec as WitToolSpec};
+    use crate::bindings::exports::prx::plugin::tool_exports::{
+        Guest, PluginResult as WitPluginResult, ToolSpec as WitToolSpec,
+    };
 
     impl Guest for EmailTool {
         fn get_spec() -> WitToolSpec {
@@ -283,38 +317,10 @@ mod wasm_exports {
 
 #[cfg(test)]
 mod tests {
-    use super::{EmailTool, HostExecutor, HostResult};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use super::EmailTool;
 
-    struct MockHost {
-        calls: Arc<Mutex<Vec<(String, bool)>>>,
-        response: HostResult,
-    }
-
-    impl HostExecutor for MockHost {
-        fn execute_tool(&self, tool: &str, _args_json: &str, allow_network: bool) -> HostResult {
-            self.calls
-                .lock()
-                .expect("lock")
-                .push((tool.to_string(), allow_network));
-            self.response.clone()
-        }
-    }
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn with_mock(response: HostResult) -> (MockHost, Arc<Mutex<Vec<(String, bool)>>>) {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        (
-            MockHost {
-                calls: calls.clone(),
-                response,
-            },
-            calls,
-        )
+    fn parse_output(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).expect("valid json output")
     }
 
     #[test]
@@ -330,64 +336,39 @@ mod tests {
     }
 
     #[test]
-    fn execute_sync_blocked_when_network_disabled() {
-        let _guard = env_lock().lock().expect("lock env");
-        std::env::remove_var("PRX_EMAIL_ENABLE_REAL_NETWORK");
-        let (host, calls) = with_mock(HostResult {
-            success: true,
-            output: "{}".to_string(),
-            error: None,
-        });
+    fn execute_list_returns_controlled_success() {
+        let out = EmailTool::execute_impl(r#"{"tool":"email.list","account_id":1}"#);
+        assert!(out.success);
+        assert!(out.error.is_none());
 
-        let out = EmailTool::execute_with(r#"{"tool":"email.sync","account_id":1}"#, &host);
-        assert!(!out.success);
-        assert!(out.error.unwrap_or_default().contains("disabled"));
-        assert!(calls.lock().expect("lock").is_empty());
+        let payload = parse_output(&out.output);
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["tool"], "email.list");
+        assert_eq!(payload["source"], "controlled-result");
     }
 
     #[test]
-    fn execute_send_calls_host_when_network_enabled() {
-        let _guard = env_lock().lock().expect("lock env");
-        std::env::set_var("PRX_EMAIL_ENABLE_REAL_NETWORK", "1");
-        let (host, calls) = with_mock(HostResult {
-            success: true,
-            output: r#"{"ok":true,"tool":"email.send"}"#.to_string(),
-            error: None,
-        });
-
-        let out = EmailTool::execute_with(
+    fn execute_send_blocked_when_network_disabled() {
+        std::env::remove_var("PRX_EMAIL_ENABLE_REAL_NETWORK");
+        let out = EmailTool::execute_impl(
             r#"{"tool":"email.send","account_id":1,"to":"a@b.com","subject":"s","body_text":"b"}"#,
-            &host,
         );
 
-        assert!(out.success);
-        let calls = calls.lock().expect("lock");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "email.send");
-        assert!(calls[0].1);
-        std::env::remove_var("PRX_EMAIL_ENABLE_REAL_NETWORK");
+        assert!(!out.success);
+        let payload = parse_output(&out.output);
+        assert_eq!(payload["error_code"], "EMAIL_REAL_NETWORK_DISABLED");
     }
 
     #[test]
-    fn execute_reply_calls_host_when_network_enabled() {
-        let _guard = env_lock().lock().expect("lock env");
-        std::env::set_var("PRX_EMAIL_ENABLE_REAL_NETWORK", "true");
-        let (host, calls) = with_mock(HostResult {
-            success: true,
-            output: r#"{"ok":true,"tool":"email.reply"}"#.to_string(),
-            error: None,
-        });
-
-        let out = EmailTool::execute_with(
-            r#"{"tool":"email.reply","account_id":1,"message_id":"m1","body_text":"reply"}"#,
-            &host,
+    fn execute_send_controlled_error_when_network_enabled() {
+        std::env::set_var("PRX_EMAIL_ENABLE_REAL_NETWORK", "1");
+        let out = EmailTool::execute_impl(
+            r#"{"tool":"email.send","account_id":1,"to":"a@b.com","subject":"s","body_text":"b"}"#,
         );
-
-        assert!(out.success);
-        let calls = calls.lock().expect("lock");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "email.reply");
-        assert!(calls[0].1);
         std::env::remove_var("PRX_EMAIL_ENABLE_REAL_NETWORK");
+
+        assert!(!out.success);
+        let payload = parse_output(&out.output);
+        assert_eq!(payload["error_code"], "EMAIL_NOT_IMPLEMENTED");
     }
 }
