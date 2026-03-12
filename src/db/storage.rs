@@ -65,12 +65,35 @@ impl EmailStore {
         self.conn.execute_batch(sql_0001)?;
         self.conn.execute_batch(sql_0002)?;
         self.conn.execute_batch(sql_0003)?;
+        ensure_column(&self.conn, "messages", "body_html", "TEXT")?;
+        ensure_column(&self.conn, "messages", "attachments_json", "TEXT")?;
         Ok(())
     }
 
     pub fn conn(&self) -> &Connection {
         &self.conn
     }
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_sql_type: &str,
+) -> Result<(), StorageError> {
+    let pragma = format!("PRAGMA table_info({})", table);
+    let mut stmt = conn.prepare(&pragma)?;
+    let exists = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|name| name == column);
+
+    if !exists {
+        let alter = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_sql_type);
+        conn.execute_batch(&alter)?;
+    }
+    Ok(())
 }
 
 fn configure_connection(conn: &Connection, config: &StoreConfig) -> Result<(), StorageError> {

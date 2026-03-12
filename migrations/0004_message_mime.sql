@@ -1,0 +1,2 @@
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS body_html TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachments_json TEXT;

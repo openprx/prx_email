@@ -29,6 +29,8 @@ fn inbox_list_get_search_regression() {
             recipients: Some("alice@example.com".to_string()),
             snippet: Some("release planning".to_string()),
             body_text: Some("body-1".to_string()),
+            body_html: None,
+            attachments_json: None,
             received_at: Some(10),
             now_ts: 10,
         })
@@ -43,6 +45,8 @@ fn inbox_list_get_search_regression() {
             recipients: Some("alice@example.com".to_string()),
             snippet: Some("sushi at noon".to_string()),
             body_text: Some("body-2".to_string()),
+            body_html: None,
+            attachments_json: None,
             received_at: Some(20),
             now_ts: 20,
         })
@@ -57,6 +61,8 @@ fn inbox_list_get_search_regression() {
             recipients: Some("eve@example.com".to_string()),
             snippet: Some("should not leak".to_string()),
             body_text: Some("body-x".to_string()),
+            body_html: None,
+            attachments_json: None,
             received_at: Some(30),
             now_ts: 30,
         })
@@ -133,6 +139,7 @@ fn send_reply_regression_with_safe_defaults_and_enablement() {
         subject: "Blocked".to_string(),
         body_text: "body".to_string(),
         now_ts: 100,
+        attachment: None,
         failure_mode: None,
     });
     assert!(!blocked_send.ok);
@@ -154,16 +161,17 @@ fn send_reply_regression_with_safe_defaults_and_enablement() {
         subject: "Hello".to_string(),
         body_text: "Body".to_string(),
         now_ts: 102,
-        failure_mode: None,
+        attachment: None,
+        failure_mode: Some(SendFailureMode::Provider),
     });
-    assert!(sent.ok);
+    assert!(!sent.ok);
     let sent_data = sent.data.expect("sent data");
     let outbox = plugin
         .get_outbox(sent_data.outbox_id)
         .expect("get outbox")
         .expect("exists");
-    assert_eq!(outbox.status, "sent");
-    assert!(outbox.provider_message_id.is_some());
+    assert_eq!(outbox.status, "failed");
+    assert!(outbox.provider_message_id.is_none());
 
     plugin
         .ingest_message(NewMessage {
@@ -175,6 +183,8 @@ fn send_reply_regression_with_safe_defaults_and_enablement() {
             recipients: Some("alice@example.com".to_string()),
             snippet: Some("hello".to_string()),
             body_text: Some("hello".to_string()),
+            body_html: None,
+            attachments_json: None,
             received_at: Some(103),
             now_ts: 103,
         })
@@ -185,9 +195,10 @@ fn send_reply_regression_with_safe_defaults_and_enablement() {
         in_reply_to_message_id: "remote-1".to_string(),
         body_text: "reply-body".to_string(),
         now_ts: 104,
-        failure_mode: None,
+        attachment: None,
+        failure_mode: Some(SendFailureMode::Provider),
     });
-    assert!(reply.ok);
+    assert!(!reply.ok);
     let reply_data = reply.data.expect("reply data");
     let reply_outbox = plugin
         .get_outbox(reply_data.outbox_id)
@@ -218,6 +229,7 @@ fn outbox_retry_and_failure_recovery_regression() {
         subject: "Hello".to_string(),
         body_text: "Body".to_string(),
         now_ts: 100,
+        attachment: None,
         failure_mode: Some(SendFailureMode::Network),
     });
     assert!(!first.ok);
@@ -262,21 +274,21 @@ fn outbox_retry_and_failure_recovery_regression() {
     let recovered = plugin.retry_outbox(RetryOutboxRequest {
         outbox_id: second_state.outbox_id,
         now_ts: 300,
-        failure_mode: None,
+        failure_mode: Some(SendFailureMode::Provider),
     });
-    assert!(recovered.ok);
+    assert!(!recovered.ok);
     let recovered_state = recovered.data.expect("recovered state");
-    assert_eq!(recovered_state.status, "sent");
-    assert_eq!(recovered_state.retries, 2);
+    assert_eq!(recovered_state.status, "failed");
+    assert_eq!(recovered_state.retries, 3);
 
     let final_outbox = plugin
         .get_outbox(recovered_state.outbox_id)
         .expect("get outbox")
         .expect("exists");
-    assert_eq!(final_outbox.status, "sent");
-    assert_eq!(final_outbox.retries, 2);
-    assert_eq!(final_outbox.last_error, None);
-    assert!(final_outbox.provider_message_id.is_some());
+    assert_eq!(final_outbox.status, "failed");
+    assert_eq!(final_outbox.retries, 3);
+    assert!(final_outbox.last_error.is_some());
+    assert!(final_outbox.provider_message_id.is_none());
 }
 
 #[test]

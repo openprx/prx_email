@@ -34,6 +34,13 @@ pub struct NewFolder {
     pub now_ts: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttachmentMeta {
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub size: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: i64,
@@ -45,6 +52,8 @@ pub struct Message {
     pub recipients: Option<String>,
     pub snippet: Option<String>,
     pub body_text: Option<String>,
+    pub body_html: Option<String>,
+    pub attachments_json: Option<String>,
     pub received_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -60,6 +69,8 @@ pub struct NewMessage {
     pub recipients: Option<String>,
     pub snippet: Option<String>,
     pub body_text: Option<String>,
+    pub body_html: Option<String>,
+    pub attachments_json: Option<String>,
     pub received_at: Option<i64>,
     pub now_ts: i64,
 }
