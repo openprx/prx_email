@@ -318,6 +318,12 @@ mod wasm_exports {
 #[cfg(test)]
 mod tests {
     use super::EmailTool;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn parse_output(json: &str) -> serde_json::Value {
         serde_json::from_str(json).expect("valid json output")
@@ -349,6 +355,7 @@ mod tests {
 
     #[test]
     fn execute_send_blocked_when_network_disabled() {
+        let _guard = env_lock().lock().expect("lock env");
         std::env::remove_var("PRX_EMAIL_ENABLE_REAL_NETWORK");
         let out = EmailTool::execute_impl(
             r#"{"tool":"email.send","account_id":1,"to":"a@b.com","subject":"s","body_text":"b"}"#,
@@ -361,6 +368,7 @@ mod tests {
 
     #[test]
     fn execute_send_controlled_error_when_network_enabled() {
+        let _guard = env_lock().lock().expect("lock env");
         std::env::set_var("PRX_EMAIL_ENABLE_REAL_NETWORK", "1");
         let out = EmailTool::execute_impl(
             r#"{"tool":"email.send","account_id":1,"to":"a@b.com","subject":"s","body_text":"b"}"#,
