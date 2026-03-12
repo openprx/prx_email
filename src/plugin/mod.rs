@@ -1,5 +1,7 @@
 mod email_plugin;
 
 pub use email_plugin::{
-    EmailPlugin, GetMessageRequest, ListMessagesRequest, PluginError, SearchMessagesRequest, SyncRequest,
+    ApiError, ApiResponse, EmailPlugin, ErrorCode, GetMessageRequest, ListMessagesRequest,
+    ReplyEmailRequest, RetryOutboxRequest, SearchMessagesRequest, SendEmailRequest,
+    SendFailureMode, SendResult, SyncRequest,
 };

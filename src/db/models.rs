@@ -84,3 +84,45 @@ pub struct UpsertSyncState {
     pub status: Option<String>,
     pub now_ts: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutboxMessage {
+    pub id: i64,
+    pub account_id: i64,
+    pub to_recipients: String,
+    pub subject: String,
+    pub body_text: String,
+    pub in_reply_to_message_id: Option<String>,
+    pub provider_message_id: Option<String>,
+    pub status: String,
+    pub retries: i64,
+    pub last_error: Option<String>,
+    pub next_attempt_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewOutboxMessage {
+    pub account_id: i64,
+    pub to_recipients: String,
+    pub subject: String,
+    pub body_text: String,
+    pub in_reply_to_message_id: Option<String>,
+    pub status: String,
+    pub retries: i64,
+    pub last_error: Option<String>,
+    pub next_attempt_at: i64,
+    pub now_ts: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateOutboxStatus {
+    pub id: i64,
+    pub status: String,
+    pub retries: i64,
+    pub last_error: Option<String>,
+    pub provider_message_id: Option<String>,
+    pub next_attempt_at: i64,
+    pub now_ts: i64,
+}

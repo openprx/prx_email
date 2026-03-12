@@ -25,8 +25,10 @@ impl EmailStore {
     }
 
     pub fn migrate(&self) -> Result<(), StorageError> {
-        let sql = include_str!("../../migrations/0001_init.sql");
-        self.conn.execute_batch(sql)?;
+        let sql_0001 = include_str!("../../migrations/0001_init.sql");
+        let sql_0002 = include_str!("../../migrations/0002_outbox.sql");
+        self.conn.execute_batch(sql_0001)?;
+        self.conn.execute_batch(sql_0002)?;
         Ok(())
     }
 

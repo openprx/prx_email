@@ -2,7 +2,8 @@ use rusqlite::{params, OptionalExtension};
 use thiserror::Error;
 
 use super::{
-    Account, EmailStore, Folder, Message, NewAccount, NewFolder, NewMessage, SyncState, UpsertSyncState,
+    Account, EmailStore, Folder, Message, NewAccount, NewFolder, NewMessage, NewOutboxMessage,
+    OutboxMessage, SyncState, UpdateOutboxStatus, UpsertSyncState,
 };
 
 #[derive(Debug, Error)]
@@ -81,7 +82,11 @@ impl<'a> EmailRepository<'a> {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn get_message(&self, account_id: i64, message_id: &str) -> Result<Option<Message>, RepoError> {
+    pub fn get_message(
+        &self,
+        account_id: i64,
+        message_id: &str,
+    ) -> Result<Option<Message>, RepoError> {
         let result = self
             .store
             .conn()
@@ -205,6 +210,63 @@ impl<'a> EmailRepository<'a> {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    pub fn create_outbox_message(&self, input: &NewOutboxMessage) -> Result<i64, RepoError> {
+        self.store.conn().execute(
+            "INSERT INTO outbox (account_id, to_recipients, subject, body_text, in_reply_to_message_id, provider_message_id, status, retries, last_error, next_attempt_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?10)",
+            params![
+                input.account_id,
+                input.to_recipients,
+                input.subject,
+                input.body_text,
+                input.in_reply_to_message_id,
+                input.status,
+                input.retries,
+                input.last_error,
+                input.next_attempt_at,
+                input.now_ts,
+            ],
+        )?;
+        Ok(self.store.conn().last_insert_rowid())
+    }
+
+    pub fn get_outbox_message(&self, outbox_id: i64) -> Result<Option<OutboxMessage>, RepoError> {
+        let result = self
+            .store
+            .conn()
+            .query_row(
+                "SELECT id, account_id, to_recipients, subject, body_text, in_reply_to_message_id, provider_message_id, status, retries, last_error, next_attempt_at, created_at, updated_at
+                 FROM outbox WHERE id = ?1",
+                params![outbox_id],
+                map_outbox,
+            )
+            .optional()?;
+        Ok(result)
+    }
+
+    pub fn update_outbox_status(&self, input: &UpdateOutboxStatus) -> Result<(), RepoError> {
+        self.store.conn().execute(
+            "UPDATE outbox
+             SET status = ?2,
+                 retries = ?3,
+                 last_error = ?4,
+                 provider_message_id = ?5,
+                 next_attempt_at = ?6,
+                 updated_at = ?7
+             WHERE id = ?1",
+            params![
+                input.id,
+                input.status,
+                input.retries,
+                input.last_error,
+                input.provider_message_id,
+                input.next_attempt_at,
+                input.now_ts,
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 fn map_message(r: &rusqlite::Row<'_>) -> Result<Message, rusqlite::Error> {
@@ -221,5 +283,23 @@ fn map_message(r: &rusqlite::Row<'_>) -> Result<Message, rusqlite::Error> {
         received_at: r.get(9)?,
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
+    })
+}
+
+fn map_outbox(r: &rusqlite::Row<'_>) -> Result<OutboxMessage, rusqlite::Error> {
+    Ok(OutboxMessage {
+        id: r.get(0)?,
+        account_id: r.get(1)?,
+        to_recipients: r.get(2)?,
+        subject: r.get(3)?,
+        body_text: r.get(4)?,
+        in_reply_to_message_id: r.get(5)?,
+        provider_message_id: r.get(6)?,
+        status: r.get(7)?,
+        retries: r.get(8)?,
+        last_error: r.get(9)?,
+        next_attempt_at: r.get(10)?,
+        created_at: r.get(11)?,
+        updated_at: r.get(12)?,
     })
 }
