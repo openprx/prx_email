@@ -60,6 +60,27 @@ let jobs = vec![
 let report = plugin.run_sync_runner(&jobs, now_ts, &SyncRunnerConfig::default());
 ```
 
+## Outlook OAuth2 Bootstrap (IMAP/SMTP)
+
+One-time bootstrap script (minimal interaction): open consent URL once, paste callback URL/code, script exchanges and stores tokens locally.
+
+```bash
+cd /opt/worker/code/prx_email
+chmod +x scripts/outlook_oauth_bootstrap.sh
+
+CLIENT_ID='<azure-app-client-id>' \
+TENANT='<tenant-id-or-common>' \
+REDIRECT_URI='http://localhost:53682/callback' \
+./scripts/outlook_oauth_bootstrap.sh
+```
+
+Notes:
+- Default scope includes: `offline_access`, `https://outlook.office.com/IMAP.AccessAsUser.All`, `https://outlook.office.com/SMTP.Send`
+- Output file defaults to `./outlook_oauth.local.env` with `chmod 600`
+- You can override output path: `./scripts/outlook_oauth_bootstrap.sh --output ~/.config/prx_email/outlook_oauth.env`
+- Optional dry-run (URL only): `./scripts/outlook_oauth_bootstrap.sh --dry-run`
+- Never commit generated token files
+
 ## Operations docs
 
 - [Operations Runbook](docs/operations_runbook.md)
