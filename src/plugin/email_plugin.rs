@@ -9,6 +9,8 @@ use lettre::{
 use mail_parser::{Address, MessageParser, MimeHeaders};
 use rustls_connector::RustlsConnector;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -62,6 +64,83 @@ pub struct EmailTransportConfig {
     pub imap: ImapConfig,
     pub smtp: SmtpConfig,
     pub attachment_store: Option<AttachmentStoreConfig>,
+    pub attachment_policy: AttachmentPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachmentPolicy {
+    pub max_size_bytes: usize,
+    pub allowed_content_types: HashSet<String>,
+}
+
+impl Default for AttachmentPolicy {
+    fn default() -> Self {
+        let allowed_content_types = [
+            "application/pdf",
+            "image/jpeg",
+            "image/png",
+            "text/plain",
+            "application/zip",
+        ]
+        .into_iter()
+        .map(|v| v.to_string())
+        .collect();
+        Self {
+            max_size_bytes: 25 * 1024 * 1024,
+            allowed_content_types,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeMetrics {
+    pub sync_attempts: u64,
+    pub sync_success: u64,
+    pub sync_failures: u64,
+    pub send_failures: u64,
+    pub retry_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncJob {
+    pub account_id: i64,
+    pub folder: String,
+    pub max_messages: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncRunnerConfig {
+    pub max_concurrency: usize,
+    pub base_backoff_seconds: i64,
+    pub max_backoff_seconds: i64,
+}
+
+impl Default for SyncRunnerConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrency: 4,
+            base_backoff_seconds: 10,
+            max_backoff_seconds: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncRunnerReport {
+    pub run_id: String,
+    pub attempted: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RefreshedOAuthToken {
+    pub token: String,
+    pub expires_at: Option<i64>,
+}
+
+pub trait OAuthRefreshProvider {
+    fn refresh_token(&self, protocol: &str, user: &str, current_token: &str) -> Result<RefreshedOAuthToken, ApiError>;
 }
 
 #[derive(Debug, Clone)]
@@ -167,26 +246,161 @@ pub struct SendResult {
 
 pub struct EmailPlugin<'a> {
     repo: EmailRepository<'a>,
-    config: Option<EmailTransportConfig>,
+    config: RefCell<Option<EmailTransportConfig>>,
+    metrics: RefCell<RuntimeMetrics>,
+    scheduler_state: RefCell<HashMap<String, (i64, u32)>>,
+    oauth_expiry_ts: RefCell<HashMap<String, i64>>,
+    refresh_provider: Option<Box<dyn OAuthRefreshProvider>>,
 }
 
 impl<'a> EmailPlugin<'a> {
     pub fn new(repo: EmailRepository<'a>) -> Self {
-        Self { repo, config: None }
+        Self {
+            repo,
+            config: RefCell::new(None),
+            metrics: RefCell::new(RuntimeMetrics::default()),
+            scheduler_state: RefCell::new(HashMap::new()),
+            oauth_expiry_ts: RefCell::new(HashMap::new()),
+            refresh_provider: None,
+        }
     }
 
-    pub fn new_with_config(repo: EmailRepository<'a>, config: EmailTransportConfig) -> Self {
+    pub fn new_with_config(repo: EmailRepository<'a>, mut config: EmailTransportConfig) -> Self {
+        if config.attachment_policy.allowed_content_types.is_empty() {
+            config.attachment_policy = AttachmentPolicy::default();
+        }
         if let Err(err) = validate_transport_config(&config) {
             log_debug("transport config validation failed", &err.message);
         }
         Self {
             repo,
-            config: Some(config),
+            config: RefCell::new(Some(config)),
+            metrics: RefCell::new(RuntimeMetrics::default()),
+            scheduler_state: RefCell::new(HashMap::new()),
+            oauth_expiry_ts: RefCell::new(HashMap::new()),
+            refresh_provider: None,
+        }
+    }
+
+    pub fn with_refresh_provider(mut self, provider: Box<dyn OAuthRefreshProvider>) -> Self {
+        self.refresh_provider = Some(provider);
+        self
+    }
+
+    pub fn reload_config(&self, mut config: EmailTransportConfig) -> Result<(), ApiError> {
+        if config.attachment_policy.allowed_content_types.is_empty() {
+            config.attachment_policy = AttachmentPolicy::default();
+        }
+        validate_transport_config(&config)?;
+        *self.config.borrow_mut() = Some(config);
+        Ok(())
+    }
+
+    pub fn reload_auth_from_env(&self, prefix: &str) {
+        let mut cfg_guard = self.config.borrow_mut();
+        let Some(cfg) = cfg_guard.as_mut() else { return; };
+
+        let imap_key = format!("{}_IMAP_OAUTH_TOKEN", prefix);
+        if let Ok(v) = std::env::var(&imap_key) {
+            cfg.imap.auth.oauth_token = Some(v);
+            cfg.imap.auth.password = None;
+        }
+        let smtp_key = format!("{}_SMTP_OAUTH_TOKEN", prefix);
+        if let Ok(v) = std::env::var(&smtp_key) {
+            cfg.smtp.auth.oauth_token = Some(v);
+            cfg.smtp.auth.password = None;
+        }
+        if let Ok(v) = std::env::var(format!("{}_IMAP_OAUTH_EXPIRES_AT", prefix))
+            && let Ok(ts) = v.parse::<i64>()
+        {
+            self.oauth_expiry_ts.borrow_mut().insert("imap".to_string(), ts);
+        }
+        if let Ok(v) = std::env::var(format!("{}_SMTP_OAUTH_EXPIRES_AT", prefix))
+            && let Ok(ts) = v.parse::<i64>()
+        {
+            self.oauth_expiry_ts.borrow_mut().insert("smtp".to_string(), ts);
+        }
+    }
+
+    pub fn metrics_snapshot(&self) -> RuntimeMetrics {
+        self.metrics.borrow().clone()
+    }
+
+    pub fn run_sync_runner(
+        &self,
+        jobs: &[SyncJob],
+        now_ts: i64,
+        runner_cfg: &SyncRunnerConfig,
+    ) -> SyncRunnerReport {
+        let run_id = format!("run-{}", now_ts);
+        let mut attempted = 0usize;
+        let mut succeeded = 0usize;
+        let mut failed = 0usize;
+        let mut running = 0usize;
+
+        for job in jobs {
+            if running >= runner_cfg.max_concurrency {
+                running = 0;
+            }
+            let key = format!("{}::{}", job.account_id, job.folder);
+            let (next_allowed_at, fails) = self
+                .scheduler_state
+                .borrow()
+                .get(&key)
+                .cloned()
+                .unwrap_or((0, 0));
+            if now_ts < next_allowed_at {
+                continue;
+            }
+            running += 1;
+            attempted += 1;
+            let result = self.sync(SyncRequest {
+                account_id: job.account_id,
+                folder: Some(job.folder.clone()),
+                cursor: None,
+                now_ts,
+                max_messages: job.max_messages,
+            });
+            match result {
+                Ok(_) => {
+                    succeeded += 1;
+                    self.scheduler_state.borrow_mut().insert(key.clone(), (now_ts, 0));
+                    log_structured("sync_runner_ok", job.account_id, Some(&job.folder), None, &run_id, None);
+                }
+                Err(err) => {
+                    failed += 1;
+                    self.metrics.borrow_mut().sync_failures += 1;
+                    let next_fails = fails + 1;
+                    let exp = i64::pow(2, next_fails.min(6));
+                    let backoff = (runner_cfg.base_backoff_seconds * exp).min(runner_cfg.max_backoff_seconds);
+                    self.scheduler_state
+                        .borrow_mut()
+                        .insert(key.clone(), (now_ts + backoff, next_fails));
+                    log_structured(
+                        "sync_runner_failed",
+                        job.account_id,
+                        Some(&job.folder),
+                        None,
+                        &run_id,
+                        Some(err.code),
+                    );
+                }
+            }
+        }
+
+        SyncRunnerReport {
+            run_id,
+            attempted,
+            succeeded,
+            failed,
         }
     }
 
     pub fn sync(&self, req: SyncRequest) -> Result<(), ApiError> {
-        let cfg = self.config.as_ref().ok_or_else(|| ApiError {
+        self.metrics.borrow_mut().sync_attempts += 1;
+        self.ensure_oauth_fresh(req.now_ts)?;
+        let cfg_guard = self.config.borrow();
+        let cfg = cfg_guard.as_ref().ok_or_else(|| ApiError {
             code: ErrorCode::Validation,
             message: "imap/smtp config missing".to_string(),
         })?;
@@ -238,6 +452,7 @@ impl<'a> EmailPlugin<'a> {
                     req.now_ts,
                     fetch,
                     cfg.attachment_store.as_ref(),
+                    &cfg.attachment_policy,
                 ) {
                     self.repo.upsert_message(&msg).map_err(storage_err)?;
                 }
@@ -259,6 +474,7 @@ impl<'a> EmailPlugin<'a> {
                 now_ts: req.now_ts,
             })
             .map_err(storage_err)?;
+        self.metrics.borrow_mut().sync_success += 1;
         Ok(())
     }
 
@@ -444,6 +660,9 @@ impl<'a> EmailPlugin<'a> {
         attachment: Option<AttachmentInput>,
         failure_mode: Option<SendFailureMode>,
     ) -> ApiResponse<SendResult> {
+        if let Err(e) = self.ensure_oauth_fresh(now_ts) {
+            return ApiResponse { ok: false, data: None, error: Some(e) };
+        }
         let outbox = match self.repo.get_outbox_message(outbox_id) {
             Ok(Some(v)) => v,
             Ok(None) => return fail(ErrorCode::Validation, "outbox record not found"),
@@ -486,6 +705,8 @@ impl<'a> EmailPlugin<'a> {
             }
             Err(provider_err) => {
                 let next_retries = outbox.retries + 1;
+                self.metrics.borrow_mut().send_failures += 1;
+                self.metrics.borrow_mut().retry_count += 1;
                 let backoff = BACKOFF_BASE_SECONDS * (1_i64 << std::cmp::min(next_retries, 10));
                 let next_attempt_at = now_ts + backoff;
                 let code = match provider_err.mode {
@@ -502,6 +723,14 @@ impl<'a> EmailPlugin<'a> {
                         provider_err.message,
                         provider_err.debug_message
                     ),
+                );
+                log_structured(
+                    "send_failed",
+                    outbox.account_id,
+                    None,
+                    Some(&outbox.id.to_string()),
+                    &format!("send-{}", now_ts),
+                    Some(code.clone()),
                 );
                 if let Err(e) = self.repo.update_outbox_status(&UpdateOutboxStatus {
                     id: outbox_id,
@@ -547,7 +776,8 @@ impl<'a> EmailPlugin<'a> {
             return Err(ProviderError { mode, message, debug_message: "simulated failure".to_string() });
         }
 
-        let cfg = self.config.as_ref().ok_or_else(|| ProviderError {
+        let cfg_guard = self.config.borrow();
+        let cfg = cfg_guard.as_ref().ok_or_else(|| ProviderError {
             mode: SendFailureMode::Provider,
             message: "smtp config missing".to_string(),
             debug_message: "smtp transport config is None".to_string(),
@@ -583,7 +813,7 @@ impl<'a> EmailPlugin<'a> {
             .body(outbox.body_text.clone());
 
         let message = if let Some(att) = attachment {
-            let bytes = read_attachment_bytes(&att)?;
+            let bytes = read_attachment_bytes(&att, cfg)?;
             let content_type = ContentType::parse(&att.content_type).map_err(provider_err)?;
             let part = Attachment::new(att.filename).body(bytes, content_type);
             msg_builder
@@ -643,6 +873,76 @@ impl<'a> EmailPlugin<'a> {
             }),
         }
     }
+
+    fn ensure_oauth_fresh(&self, now_ts: i64) -> Result<(), ApiError> {
+        let mut cfg_guard = self.config.borrow_mut();
+        let Some(cfg) = cfg_guard.as_mut() else { return Ok(()); };
+        refresh_protocol_token(
+            "imap",
+            &cfg.imap.user,
+            &mut cfg.imap.auth,
+            now_ts,
+            &self.oauth_expiry_ts,
+            self.refresh_provider.as_deref(),
+        )?;
+        refresh_protocol_token(
+            "smtp",
+            &cfg.smtp.user,
+            &mut cfg.smtp.auth,
+            now_ts,
+            &self.oauth_expiry_ts,
+            self.refresh_provider.as_deref(),
+        )?;
+        Ok(())
+    }
+}
+
+fn refresh_protocol_token(
+    protocol: &str,
+    user: &str,
+    auth: &mut AuthConfig,
+    now_ts: i64,
+    expiry_state: &RefCell<HashMap<String, i64>>,
+    provider: Option<&dyn OAuthRefreshProvider>,
+) -> Result<(), ApiError> {
+    let Some(token) = auth.oauth_token.clone() else {
+        return Ok(());
+    };
+    let expires_at = expiry_state.borrow().get(protocol).cloned();
+    let needs_refresh = expires_at.map(|ts| ts <= now_ts + 60).unwrap_or(false);
+    if !needs_refresh {
+        return Ok(());
+    }
+
+    let provider = provider.ok_or_else(|| ApiError {
+        code: ErrorCode::Provider,
+        message: format!("{protocol} oauth token expired and no refresh provider configured"),
+    })?;
+    let refreshed = provider.refresh_token(protocol, user, &token)?;
+    auth.oauth_token = Some(refreshed.token);
+    if let Some(ts) = refreshed.expires_at {
+        expiry_state.borrow_mut().insert(protocol.to_string(), ts);
+    }
+    Ok(())
+}
+
+fn log_structured(
+    event: &str,
+    account_id: i64,
+    folder: Option<&str>,
+    message_id: Option<&str>,
+    run_id: &str,
+    error_code: Option<ErrorCode>,
+) {
+    let payload = serde_json::json!({
+        "event": event,
+        "account": account_id,
+        "folder": folder,
+        "message_id": message_id,
+        "run_id": run_id,
+        "error_code": error_code,
+    });
+    eprintln!("[prx_email][structured] {}", payload);
 }
 
 #[derive(Debug, Clone)]
@@ -652,18 +952,30 @@ struct ProviderError {
     debug_message: String,
 }
 
-fn read_attachment_bytes(input: &AttachmentInput) -> Result<Vec<u8>, ProviderError> {
-    match (&input.base64, &input.path) {
+fn read_attachment_bytes(input: &AttachmentInput, cfg: &EmailTransportConfig) -> Result<Vec<u8>, ProviderError> {
+    enforce_attachment_policy(&cfg.attachment_policy, &input.content_type, 0)?;
+    let bytes = match (&input.base64, &input.path) {
         (Some(b64), None) => base64::engine::general_purpose::STANDARD
             .decode(b64)
-            .map_err(provider_err),
-        (None, Some(path)) => fs::read(path).map_err(network_err_provider),
-        _ => Err(ProviderError {
-            mode: SendFailureMode::Provider,
-            message: "attachment requires exactly one of base64 or path".to_string(),
-            debug_message: "attachment input has both/none of base64/path".to_string(),
-        }),
-    }
+            .map_err(provider_err)?,
+        (None, Some(path)) => {
+            if let Some(store) = cfg.attachment_store.as_ref() {
+                let resolved = safe_resolve_under_root(Path::new(&store.dir), Path::new(path))?;
+                fs::read(resolved).map_err(network_err_provider)?
+            } else {
+                fs::read(path).map_err(network_err_provider)?
+            }
+        }
+        _ => {
+            return Err(ProviderError {
+                mode: SendFailureMode::Provider,
+                message: "attachment requires exactly one of base64 or path".to_string(),
+                debug_message: "attachment input has both/none of base64/path".to_string(),
+            })
+        }
+    };
+    enforce_attachment_policy(&cfg.attachment_policy, &input.content_type, bytes.len())?;
+    Ok(bytes)
 }
 
 fn parse_imap_fetch(
@@ -672,9 +984,10 @@ fn parse_imap_fetch(
     now_ts: i64,
     fetch: &Fetch,
     attachment_store: Option<&AttachmentStoreConfig>,
+    attachment_policy: &AttachmentPolicy,
 ) -> Option<NewMessage> {
     let raw = fetch.body()?;
-    let parsed = parse_mime_message(raw, attachment_store, account_id, now_ts)?;
+    let parsed = parse_mime_message(raw, attachment_store, attachment_policy, account_id, now_ts)?;
     Some(NewMessage {
         account_id,
         folder_id,
@@ -708,6 +1021,7 @@ struct ParsedMime {
 fn parse_mime_message(
     raw: &[u8],
     attachment_store: Option<&AttachmentStoreConfig>,
+    attachment_policy: &AttachmentPolicy,
     account_id: i64,
     now_ts: i64,
 ) -> Option<ParsedMime> {
@@ -736,20 +1050,23 @@ fn parse_mime_message(
         .enumerate()
         .map(|(idx, part)| {
             let filename = part.attachment_name().map(|n| n.to_string());
+            let content_type = part
+                .content_type()
+                .map(|c| format!("{}/{}", c.c_type, c.c_subtype.clone().unwrap_or_else(|| "octet-stream".into())));
             let local_path = persist_attachment(
                 attachment_store,
+                attachment_policy,
                 account_id,
                 &message_id,
                 idx,
                 filename.as_deref(),
+                content_type.as_deref(),
                 part.contents(),
                 now_ts,
             );
             AttachmentMeta {
                 filename,
-                content_type: part
-                    .content_type()
-                    .map(|c| format!("{}/{}", c.c_type, c.c_subtype.clone().unwrap_or_else(|| "octet-stream".into()))),
+                content_type,
                 size: part.contents().len(),
                 local_path,
             }
@@ -812,12 +1129,15 @@ fn first_address(address: Option<&Address<'_>>) -> Option<String> {
     flatten_addresses(address).and_then(|v| v.split(',').next().map(|s| s.trim().to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_attachment(
     attachment_store: Option<&AttachmentStoreConfig>,
+    policy: &AttachmentPolicy,
     account_id: i64,
     message_id: &str,
     index: usize,
     filename: Option<&str>,
+    content_type: Option<&str>,
     bytes: &[u8],
     now_ts: i64,
 ) -> Option<String> {
@@ -826,14 +1146,71 @@ fn persist_attachment(
         return None;
     }
 
+    enforce_attachment_policy(policy, content_type.unwrap_or("application/octet-stream"), bytes.len()).ok()?;
+
     let root = Path::new(&cfg.dir);
     let safe_message_id = sanitize_path_component(message_id);
     let safe_filename = sanitize_path_component(filename.unwrap_or("attachment.bin"));
     let account_dir = root.join(account_id.to_string()).join(safe_message_id);
     fs::create_dir_all(&account_dir).ok()?;
     let path: PathBuf = account_dir.join(format!("{}-{}-{}", now_ts, index, safe_filename));
-    fs::write(&path, bytes).ok()?;
-    Some(path.to_string_lossy().to_string())
+    let safe_target = safe_resolve_under_root(root, &path).ok()?;
+    fs::write(&safe_target, bytes).ok()?;
+    Some(safe_target.to_string_lossy().to_string())
+}
+
+fn enforce_attachment_policy(
+    policy: &AttachmentPolicy,
+    content_type: &str,
+    size: usize,
+) -> Result<(), ProviderError> {
+    if size > policy.max_size_bytes {
+        return Err(ProviderError {
+            mode: SendFailureMode::Provider,
+            message: "attachment exceeds size limit".to_string(),
+            debug_message: format!("size={} max={}", size, policy.max_size_bytes),
+        });
+    }
+    if !policy.allowed_content_types.contains(content_type) {
+        return Err(ProviderError {
+            mode: SendFailureMode::Provider,
+            message: "attachment content type is not allowed".to_string(),
+            debug_message: format!("content_type={content_type}"),
+        });
+    }
+    Ok(())
+}
+
+fn safe_resolve_under_root(root: &Path, candidate: &Path) -> Result<PathBuf, ProviderError> {
+    let root_abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root_abs.join(candidate)
+    };
+    let normalized = normalize_path(&joined);
+    if !normalized.starts_with(&root_abs) {
+        return Err(ProviderError {
+            mode: SendFailureMode::Provider,
+            message: "attachment path escapes storage root".to_string(),
+            debug_message: format!("root={} candidate={}", root_abs.display(), normalized.display()),
+        });
+    }
+    Ok(normalized)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn sanitize_path_component(input: &str) -> String {
@@ -936,6 +1313,12 @@ fn validate_transport_config(cfg: &EmailTransportConfig) -> Result<(), ApiError>
     if cfg.imap.host.trim().is_empty() || cfg.smtp.host.trim().is_empty() {
         return Err(ApiError { code: ErrorCode::Validation, message: "imap/smtp host is required".to_string() });
     }
+    if cfg.attachment_policy.max_size_bytes == 0 || cfg.attachment_policy.allowed_content_types.is_empty() {
+        return Err(ApiError {
+            code: ErrorCode::Validation,
+            message: "attachment policy must define max size and allowed types".to_string(),
+        });
+    }
     validate_auth_config("imap", &cfg.imap.user, &cfg.imap.auth)?;
     validate_auth_config("smtp", &cfg.smtp.user, &cfg.smtp.auth)?;
     Ok(())
@@ -1000,14 +1383,14 @@ fn log_debug(context: &str, details: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_references_chain, parse_mime_message, ReplyEmailRequest};
+    use super::{build_references_chain, parse_mime_message, AttachmentPolicy, ReplyEmailRequest};
     use crate::db::{EmailRepository, EmailStore, NewAccount, NewMessage};
     use crate::plugin::EmailPlugin;
 
     #[test]
     fn parse_mime_extracts_text_html_and_attachments() {
         let raw = b"From: Alice <alice@example.com>\r\nTo: Bob <bob@example.com>\r\nSubject: Hello\r\nMessage-ID: <m1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=abc\r\n\r\n--abc\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nPlain body\r\n--abc\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body>HTML body</body></html>\r\n--abc\r\nContent-Type: text/plain; name=file.txt\r\nContent-Disposition: attachment; filename=file.txt\r\n\r\nhello\r\n--abc--\r\n";
-        let parsed = parse_mime_message(raw, None, 1, 1).expect("parse");
+        let parsed = parse_mime_message(raw, None, &AttachmentPolicy::default(), 1, 1).expect("parse");
         assert_eq!(parsed.body_text.as_deref(), Some("Plain body"));
         assert!(parsed.body_html.is_some());
         assert_eq!(parsed.attachments.len(), 1);
@@ -1070,5 +1453,47 @@ mod tests {
             .expect("get")
             .expect("exists");
         assert_eq!(outbox.in_reply_to_message_id.as_deref(), Some("<root@example.com>"));
+    }
+
+    #[test]
+    fn reload_auth_from_env_updates_tokens() {
+        let store = EmailStore::open_in_memory().expect("open");
+        store.migrate().expect("migrate");
+        let repo = EmailRepository::new(&store);
+        let plugin = EmailPlugin::new_with_config(
+            repo,
+            super::EmailTransportConfig {
+                imap: super::ImapConfig {
+                    host: "imap.example.com".to_string(),
+                    port: 993,
+                    user: "alice@example.com".to_string(),
+                    auth: super::AuthConfig {
+                        password: None,
+                        oauth_token: Some("old-imap".to_string()),
+                    },
+                },
+                smtp: super::SmtpConfig {
+                    host: "smtp.example.com".to_string(),
+                    port: 465,
+                    user: "alice@example.com".to_string(),
+                    auth: super::AuthConfig {
+                        password: None,
+                        oauth_token: Some("old-smtp".to_string()),
+                    },
+                },
+                attachment_store: None,
+                attachment_policy: super::AttachmentPolicy::default(),
+            },
+        );
+
+        unsafe {
+            std::env::set_var("PRX_TEST_IMAP_OAUTH_TOKEN", "new-imap");
+            std::env::set_var("PRX_TEST_SMTP_OAUTH_TOKEN", "new-smtp");
+        }
+        plugin.reload_auth_from_env("PRX_TEST");
+        let cfg = plugin.config.borrow();
+        let cfg = cfg.as_ref().expect("cfg");
+        assert_eq!(cfg.imap.auth.oauth_token.as_deref(), Some("new-imap"));
+        assert_eq!(cfg.smtp.auth.oauth_token.as_deref(), Some("new-smtp"));
     }
 }

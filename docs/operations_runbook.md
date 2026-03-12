@@ -1,196 +1,113 @@
-# PRX Email M4.1 Operations Runbook (SQLite-only)
+# PRX Email M4.3 Operations Runbook
 
 ## Scope
 
-This runbook is for operating `prx_email` M4.2 in production with SQLite persistence.
+Runbook for operating `prx_email` in production with SQLite persistence.
 
-## Configuration
+## Runtime configuration
 
-`EmailStore` default runtime settings are tuned for production-safe SQLite behavior:
+`EmailStore` defaults:
 
-- `PRAGMA foreign_keys = ON`
-- `PRAGMA journal_mode = WAL`
-- `PRAGMA synchronous = NORMAL`
-- `PRAGMA busy_timeout = 5000ms`
-- `PRAGMA wal_autocheckpoint = 1000`
+- `foreign_keys = ON`
+- `journal_mode = WAL`
+- `synchronous = NORMAL`
+- `busy_timeout = 5000ms`
+- `wal_autocheckpoint = 1000`
 
-If needed, create the store with explicit options via `StoreConfig`:
+## OAuth token operations
 
-- `enable_wal`
-- `busy_timeout_ms`
-- `wal_autocheckpoint_pages`
-- `synchronous` (`Full`, `Normal`, `Off`)
+### Refresh model
 
-Recommended defaults for production are the current defaults in `StoreConfig::default()`.
+- OAuth refresh is abstracted by `OAuthRefreshProvider`.
+- When `*_OAUTH_EXPIRES_AT <= now + 60s`, plugin attempts refresh.
+- If token expired and no provider is configured, request fails fast with provider error.
 
-## M4.1 Operational Notes
+### Manual hot reload from env
 
-## M4.2 Auth & Security Closure
+Set environment variables and trigger `reload_auth_from_env("PRX_EMAIL")`:
 
-### Unified auth config (IMAP + SMTP)
+- `PRX_EMAIL_IMAP_OAUTH_TOKEN`
+- `PRX_EMAIL_SMTP_OAUTH_TOKEN`
+- `PRX_EMAIL_IMAP_OAUTH_EXPIRES_AT`
+- `PRX_EMAIL_SMTP_OAUTH_EXPIRES_AT`
 
-Both transports use the same auth schema:
+Use `reload_config(...)` for full transport/policy reload.
 
-- `auth.password`
-- `auth.oauth_token`
+## Sync runner operations
 
-Exactly one must be set for each protocol.
+Use `run_sync_runner` for periodic polling by account/folder.
 
-### Startup validation
+- Input: `Vec<SyncJob { account_id, folder, max_messages }>`
+- Guardrails:
+  - `max_concurrency`
+  - exponential failure backoff (`base_backoff_seconds`, `max_backoff_seconds`)
+- Output: `SyncRunnerReport { run_id, attempted, succeeded, failed }`
 
-`EmailPlugin::new_with_config` and runtime sync/send paths validate transport config before network calls:
+## Observability baseline
 
-- host/user required
-- exactly one auth method required
+### Metrics
 
-Validation errors are human-readable and do not include raw credentials/tokens.
+`metrics_snapshot()` exposes:
 
-### Security logging
+- `sync_attempts`
+- `sync_success`
+- `sync_failures`
+- `send_failures`
+- `retry_count`
 
-Failure logs now redact recipient mailbox in debug lines and never log raw `password`/`oauth_token`.
+### Structured logs
 
-### Error grading
+`[prx_email][structured]` payload includes:
 
-Provider/network errors are split into:
+- `account`
+- `folder`
+- `message_id`
+- `run_id`
+- `error_code`
 
-- user-facing message (safe, concise)
-- debug detail (captured in server logs for tracing)
+## Attachment governance
 
+`AttachmentPolicy` enforces:
 
-### Reply threading (`References`)
+- max size (`max_size_bytes`)
+- whitelist (`allowed_content_types`)
 
-- `reply` now sends both:
-  - `In-Reply-To: <parent-message-id>`
-  - `References: <existing-parent-references...> <parent-message-id>`
-- This improves thread stitching across Gmail/Outlook/IMAP clients.
+Path safety:
 
-### Multi-folder sync
-
-- `email.sync` now accepts a folder path (for example `INBOX`, `Sent`).
-- Sync cursor is tracked per `(account_id, folder_id)` in `sync_state`.
-- If request cursor is omitted, last folder cursor is reused automatically.
-
-### Attachment local persistence (optional)
-
-- Configure attachment persistence in transport config:
-  - `attachment_store.enabled = true`
-  - `attachment_store.dir = /path/to/attachment-cache`
-- On inbound sync, each attachment metadata includes `local_path` when write succeeds.
-- Suggested ops policy:
-  - keep directory on local encrypted disk
-  - schedule periodic cleanup (age/size caps)
-  - back up DB metadata and files together for consistency
-
-## Migration Procedure
-
-1. Stop write traffic or place the service in maintenance mode.
-2. Back up the database (see Backup section).
-3. Start the updated service; `EmailStore::migrate()` is idempotent and safe to re-run.
-4. Verify feature-flag seed data exists:
-   - `inbox_read` (default enabled)
-   - `inbox_search` (default enabled)
-   - `email_send` (default disabled)
-   - `email_reply` (default disabled)
-   - `outbox_retry` (default disabled)
-
-## Staged Rollout Strategy
-
-High-risk features are disabled by default and must be explicitly enabled.
-
-### Stage 0: Read-only
-
-- Keep defaults unchanged.
-- Inbox APIs remain enabled; outbound APIs stay blocked.
-
-### Stage 1: Internal canary
-
-- Enable account-level overrides only for internal accounts:
-  - `set_account_feature(account_id, "email_send", true, now_ts)`
-  - `set_account_feature(account_id, "email_reply", true, now_ts)`
-  - `set_account_feature(account_id, "outbox_retry", true, now_ts)`
-
-### Stage 2: Percentage rollout
-
-- Use deterministic account bucketing:
-  - `apply_percentage_rollout(account_id, feature, percentage, now_ts)`
-- Increase in small steps (for example 5% -> 25% -> 50% -> 100%).
-
-### Stage 3: General availability
-
-- Flip global defaults after confidence is high:
-  - `set_feature_default(feature, true, now_ts)`
-- Optional: remove account-level overrides where no longer needed.
-
-## SQLite Backup / Restore
-
-### Online backup (preferred)
-
-Use SQLite backup command against a live DB with WAL checkpoint:
-
-```bash
-sqlite3 /path/to/prx_email.db "PRAGMA wal_checkpoint(FULL);" ".backup '/backup/prx_email_$(date +%F_%H%M%S).db'"
-```
-
-### File copy backup (maintenance window)
-
-1. Stop writes.
-2. Copy DB and sidecar files if they exist:
-
-```bash
-cp /path/to/prx_email.db /backup/
-cp /path/to/prx_email.db-wal /backup/ 2>/dev/null || true
-cp /path/to/prx_email.db-shm /backup/ 2>/dev/null || true
-```
-
-### Restore
-
-1. Stop service.
-2. Replace the DB with a backup.
-3. Start service and run standard health checks.
-4. Run `PRAGMA integrity_check;` post-restore.
+- attachment write path must resolve under configured store root
+- traversal (`../`) escape is rejected
 
 ## Troubleshooting
 
-### `database is locked`
+### OAuth expired errors
 
-- Ensure only one writer process is active.
-- Confirm `busy_timeout` is configured.
-- Check for long-running write transactions.
+- Verify `*_OAUTH_EXPIRES_AT` is Unix seconds and not stale.
+- Ensure refresh provider is wired when using expiring OAuth tokens.
+- If no provider exists, use manual env reload before next sync/send.
 
-### Unexpected outbound API failures (`FeatureDisabled`)
+### Sync runner keeps skipping jobs
 
-- Confirm feature defaults and per-account overrides.
-- Verify account IDs are correct in rollout automation.
+- Check backoff state after repeated failures.
+- Verify network reachability and IMAP auth correctness.
+- Temporarily lower backoff and re-run with a fresh `now_ts`.
 
-### Retry queue grows without recovery
+### Attachments rejected
 
-- Inspect `outbox` statuses and `last_error`.
-- Confirm `outbox_retry` is enabled for affected accounts.
-- Verify retry caller passes a moving `now_ts` and handles backoff.
+- Check MIME whitelist (`allowed_content_types`).
+- Check file size against `max_size_bytes`.
+- Ensure file path is under attachment storage root.
 
-### Migration issues
+### High send failure rate
 
-- Re-run `migrate()`; migrations are idempotent.
-- Validate schema objects in `sqlite_master` and flag rows in `feature_flags`.
+- Inspect structured logs by `run_id` and `error_code`.
+- Check SMTP auth mode (exactly one of password/oauth).
+- Validate provider/network availability before enabling broad rollout.
 
-## Health Checks
+## Release gates
 
-Run periodic queries:
-
-- Outbox status counts:
-
-```sql
-SELECT status, COUNT(*) FROM outbox GROUP BY status;
-```
-
-- Old failed rows:
-
-```sql
-SELECT COUNT(*) FROM outbox WHERE status = 'failed' AND updated_at < strftime('%s','now') - 86400;
-```
-
-- Feature defaults:
-
-```sql
-SELECT key, default_enabled, risk_level FROM feature_flags ORDER BY key;
+```bash
+source ~/.cargo/env
+cargo test
+cargo build
+cargo clippy -- -D warnings
 ```

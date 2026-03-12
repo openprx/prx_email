@@ -1,7 +1,7 @@
 use prx_email::db::{EmailRepository, EmailStore, NewAccount};
 use prx_email::plugin::{
-    EmailPlugin, EmailTransportConfig, ImapConfig, ReplyEmailRequest, SendEmailRequest, SmtpConfig,
-    SyncRequest, AuthConfig,
+    AttachmentPolicy, AuthConfig, EmailPlugin, EmailTransportConfig, ImapConfig,
+    ReplyEmailRequest, SendEmailRequest, SmtpConfig, SyncRequest,
 };
 
 #[test]
@@ -57,6 +57,7 @@ fn e2e_sync_send_reply_smoke() {
                 },
             },
             attachment_store: None,
+            attachment_policy: AttachmentPolicy::default(),
         },
     );
 
