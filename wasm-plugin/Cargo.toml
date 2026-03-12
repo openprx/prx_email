@@ -1,0 +1,17 @@
+[workspace]
+
+[package]
+name = "prx-email-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "PRX Email WASM tool plugin"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wit-bindgen = { version = "0.51", default-features = false, features = ["macros"] }
+

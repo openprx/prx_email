@@ -1,0 +1,23 @@
+[plugin]
+name = "prx-email"
+version = "0.1.0"
+description = "Email tool plugin for PRX"
+author = "andy"
+wasm = "plugin.wasm"
+
+[[capabilities]]
+type = "tool"
+name = "email.dispatch"
+description = "Dispatch email.sync/list/get/search/send/reply"
+
+[permissions]
+required = ["log", "config"]
+optional = ["kv", "events", "memory", "http-outbound"]
+
+[resources]
+max_fuel = 100000000
+max_memory_mb = 64
+max_execution_time_ms = 10000
+
+[config]
+plugin_name = "prx-email"
