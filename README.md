@@ -11,7 +11,14 @@
 - Multi-account / multi-folder periodic scheduler baseline:
   - `run_sync_runner(jobs, now_ts, runner_cfg)`
   - polling by `account + folder`
-  - max concurrency window + failure backoff
+  - per-run hard cap by `max_concurrency` + failure backoff
+- Outbox send safety:
+  - atomic claim (`pending/failed` + `next_attempt_at <= now` -> `sending`)
+  - conditional finalize (`sending` -> `sent/failed`) to prevent duplicate sends
+  - deterministic SMTP Message-ID idempotency key (`outbox-<id>-<retries>`)
+- API guardrails:
+  - list/search `limit` must be within `1..=500`
+  - retry only allowed for `pending/failed` and due records
 - Observability baseline:
   - in-memory counters (`RuntimeMetrics`): sync attempts/success/failures, send failures, retry count
   - structured log payload with `account/folder/message_id/run_id/error_code`

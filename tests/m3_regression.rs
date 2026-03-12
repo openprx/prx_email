@@ -260,6 +260,17 @@ fn outbox_retry_and_failure_recovery_regression() {
         .set_account_feature(account_id, FEATURE_OUTBOX_RETRY, true, 111)
         .expect("enable retry");
 
+    let early_retry = plugin.retry_outbox(RetryOutboxRequest {
+        outbox_id: first_state.outbox_id,
+        now_ts: 105,
+        failure_mode: None,
+    });
+    assert!(!early_retry.ok);
+    assert_eq!(
+        early_retry.error.as_ref().map(|e| &e.code),
+        Some(&ErrorCode::Validation)
+    );
+
     let second = plugin.retry_outbox(RetryOutboxRequest {
         outbox_id: first_state.outbox_id,
         now_ts: 200,

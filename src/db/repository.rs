@@ -298,6 +298,46 @@ impl<'a> EmailRepository<'a> {
         Ok(())
     }
 
+    pub fn claim_outbox_for_send(&self, outbox_id: i64, now_ts: i64) -> Result<bool, RepoError> {
+        let affected = self.store.conn().execute(
+            "UPDATE outbox
+             SET status = 'sending', updated_at = ?2
+             WHERE id = ?1
+               AND status IN ('pending', 'failed')
+               AND next_attempt_at <= ?2",
+            params![outbox_id, now_ts],
+        )?;
+        Ok(affected == 1)
+    }
+
+    pub fn update_outbox_status_if_current(
+        &self,
+        input: &UpdateOutboxStatus,
+        expected_current_status: &str,
+    ) -> Result<bool, RepoError> {
+        let affected = self.store.conn().execute(
+            "UPDATE outbox
+             SET status = ?2,
+                 retries = ?3,
+                 last_error = ?4,
+                 provider_message_id = ?5,
+                 next_attempt_at = ?6,
+                 updated_at = ?7
+             WHERE id = ?1 AND status = ?8",
+            params![
+                input.id,
+                input.status,
+                input.retries,
+                input.last_error,
+                input.provider_message_id,
+                input.next_attempt_at,
+                input.now_ts,
+                expected_current_status,
+            ],
+        )?;
+        Ok(affected == 1)
+    }
+
     pub fn set_feature_default(
         &self,
         feature_key: &str,

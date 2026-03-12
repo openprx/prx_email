@@ -39,7 +39,7 @@ Use `run_sync_runner` for periodic polling by account/folder.
 
 - Input: `Vec<SyncJob { account_id, folder, max_messages }>`
 - Guardrails:
-  - `max_concurrency`
+  - `max_concurrency` = max number of due jobs attempted in one runner tick
   - exponential failure backoff (`base_backoff_seconds`, `max_backoff_seconds`)
 - Output: `SyncRunnerReport { run_id, attempted, succeeded, failed }`
 
@@ -64,6 +64,16 @@ Use `run_sync_runner` for periodic polling by account/folder.
 - `message_id`
 - `run_id`
 - `error_code`
+
+## Outbox retry/send state machine
+
+- Claim phase is atomic: record can enter `sending` only when `status IN ('pending','failed')` and `next_attempt_at <= now`.
+- Finalization is conditional: status updates to `sent/failed` only when current status is still `sending`.
+- `retry_outbox` rejects:
+  - non-retriable states (`sent`, `sending`)
+  - attempts before `next_attempt_at` (`retry_not_due`).
+
+This prevents concurrent duplicate sends and enforces backoff windows.
 
 ## Attachment governance
 
@@ -102,6 +112,26 @@ Path safety:
 - Inspect structured logs by `run_id` and `error_code`.
 - Check SMTP auth mode (exactly one of password/oauth).
 - Validate provider/network availability before enabling broad rollout.
+- Debug logs sanitize provider debug text and truncate to 160 chars; use provider-side logs for full diagnostics.
+
+### Outbox stuck in `sending`
+
+If process crashed after claim and before finalize, rows can stay in `sending`.
+
+```sql
+-- identify stale rows (example threshold: 15 minutes)
+SELECT id, account_id, updated_at
+FROM outbox
+WHERE status = 'sending' AND updated_at < strftime('%s','now') - 900;
+
+-- recover to failed and schedule retry
+UPDATE outbox
+SET status = 'failed',
+    last_error = 'recovered_from_stuck_sending',
+    next_attempt_at = strftime('%s','now') + 30,
+    updated_at = strftime('%s','now')
+WHERE status = 'sending' AND updated_at < strftime('%s','now') - 900;
+```
 
 ## Release gates
 

@@ -9,6 +9,7 @@ use lettre::{
 use mail_parser::{Address, MessageParser, MimeHeaders};
 use rustls_connector::RustlsConnector;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -30,6 +31,9 @@ const FEATURE_INBOX_SEARCH: &str = "inbox_search";
 const FEATURE_EMAIL_SEND: &str = "email_send";
 const FEATURE_EMAIL_REPLY: &str = "email_reply";
 const FEATURE_OUTBOX_RETRY: &str = "outbox_retry";
+const MIN_LIST_LIMIT: i64 = 1;
+const MAX_LIST_LIMIT: i64 = 500;
+const MAX_DEBUG_MESSAGE_LEN: usize = 160;
 
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
@@ -336,12 +340,10 @@ impl<'a> EmailPlugin<'a> {
         let mut attempted = 0usize;
         let mut succeeded = 0usize;
         let mut failed = 0usize;
-        let mut running = 0usize;
 
+        let max_concurrency = runner_cfg.max_concurrency.max(1);
+        let mut due_jobs = Vec::new();
         for job in jobs {
-            if running >= runner_cfg.max_concurrency {
-                running = 0;
-            }
             let key = format!("{}::{}", job.account_id, job.folder);
             let (next_allowed_at, fails) = self
                 .scheduler_state
@@ -352,7 +354,10 @@ impl<'a> EmailPlugin<'a> {
             if now_ts < next_allowed_at {
                 continue;
             }
-            running += 1;
+            due_jobs.push((job, key, fails));
+        }
+
+        for (job, key, fails) in due_jobs.into_iter().take(max_concurrency) {
             attempted += 1;
             let result = self.sync(SyncRequest {
                 account_id: job.account_id,
@@ -503,8 +508,9 @@ impl<'a> EmailPlugin<'a> {
 
     pub fn list(&self, req: ListMessagesRequest) -> Result<Vec<Message>, ApiError> {
         self.require_feature(req.account_id, FEATURE_INBOX_READ)?;
+        let limit = sanitize_limit(req.limit)?;
         self.repo
-            .list_messages(req.account_id, req.limit)
+            .list_messages(req.account_id, limit)
             .map_err(storage_err)
     }
 
@@ -517,8 +523,9 @@ impl<'a> EmailPlugin<'a> {
 
     pub fn search(&self, req: SearchMessagesRequest) -> Result<Vec<Message>, ApiError> {
         self.require_feature(req.account_id, FEATURE_INBOX_SEARCH)?;
+        let limit = sanitize_limit(req.limit)?;
         self.repo
-            .search_messages(req.account_id, &req.query, req.limit)
+            .search_messages(req.account_id, &req.query, limit)
             .map_err(storage_err)
     }
 
@@ -595,13 +602,19 @@ impl<'a> EmailPlugin<'a> {
     }
 
     pub fn retry_outbox(&self, req: RetryOutboxRequest) -> ApiResponse<SendResult> {
-        let account_id = match self.repo.get_outbox_message(req.outbox_id) {
-            Ok(Some(outbox)) => outbox.account_id,
+        let outbox = match self.repo.get_outbox_message(req.outbox_id) {
+            Ok(Some(outbox)) => outbox,
             Ok(None) => return fail(ErrorCode::Validation, "outbox record not found"),
             Err(e) => return fail(ErrorCode::Storage, &e.to_string()),
         };
-        if let Err(e) = self.require_feature(account_id, FEATURE_OUTBOX_RETRY) {
+        if let Err(e) = self.require_feature(outbox.account_id, FEATURE_OUTBOX_RETRY) {
             return ApiResponse { ok: false, data: None, error: Some(e) };
+        }
+        if !matches!(outbox.status.as_str(), STATUS_PENDING | STATUS_FAILED) {
+            return fail(ErrorCode::Validation, "retry_not_allowed_for_status");
+        }
+        if outbox.next_attempt_at > req.now_ts {
+            return fail(ErrorCode::Validation, "retry_not_due");
         }
 
         self.deliver_outbox(req.outbox_id, req.now_ts, None, req.failure_mode)
@@ -663,45 +676,54 @@ impl<'a> EmailPlugin<'a> {
         if let Err(e) = self.ensure_oauth_fresh(now_ts) {
             return ApiResponse { ok: false, data: None, error: Some(e) };
         }
+
+        let claimed = match self.repo.claim_outbox_for_send(outbox_id, now_ts) {
+            Ok(v) => v,
+            Err(e) => return fail(ErrorCode::Storage, &e.to_string()),
+        };
+        if !claimed {
+            let latest = match self.repo.get_outbox_message(outbox_id) {
+                Ok(Some(v)) => v,
+                Ok(None) => return fail(ErrorCode::Validation, "outbox record not found"),
+                Err(e) => return fail(ErrorCode::Storage, &e.to_string()),
+            };
+            return fail(
+                ErrorCode::Validation,
+                &format!("outbox_not_claimable status={} next_attempt_at={}", latest.status, latest.next_attempt_at),
+            );
+        }
+
         let outbox = match self.repo.get_outbox_message(outbox_id) {
             Ok(Some(v)) => v,
             Ok(None) => return fail(ErrorCode::Validation, "outbox record not found"),
             Err(e) => return fail(ErrorCode::Storage, &e.to_string()),
         };
 
-        if let Err(e) = self.repo.update_outbox_status(&UpdateOutboxStatus {
-            id: outbox_id,
-            status: STATUS_SENDING.to_string(),
-            retries: outbox.retries,
-            last_error: None,
-            provider_message_id: outbox.provider_message_id.clone(),
-            next_attempt_at: outbox.next_attempt_at,
-            now_ts,
-        }) {
-            return fail(ErrorCode::Storage, &e.to_string());
-        }
-
         match self.send_via_provider(&outbox, attachment, failure_mode) {
             Ok(provider_message_id) => {
-                if let Err(e) = self.repo.update_outbox_status(&UpdateOutboxStatus {
-                    id: outbox_id,
-                    status: STATUS_SENT.to_string(),
-                    retries: outbox.retries,
-                    last_error: None,
-                    provider_message_id: Some(provider_message_id.clone()),
-                    next_attempt_at: now_ts,
-                    now_ts,
-                }) {
-                    return fail(ErrorCode::Storage, &e.to_string());
+                let updated = self.repo.update_outbox_status_if_current(
+                    &UpdateOutboxStatus {
+                        id: outbox_id,
+                        status: STATUS_SENT.to_string(),
+                        retries: outbox.retries,
+                        last_error: None,
+                        provider_message_id: Some(provider_message_id.clone()),
+                        next_attempt_at: now_ts,
+                        now_ts,
+                    },
+                    STATUS_SENDING,
+                );
+                match updated {
+                    Ok(true) => ok(SendResult {
+                        outbox_id,
+                        status: STATUS_SENT.to_string(),
+                        retries: outbox.retries,
+                        provider_message_id: Some(provider_message_id),
+                        next_attempt_at: now_ts,
+                    }),
+                    Ok(false) => fail(ErrorCode::Validation, "outbox_state_changed_before_finalize"),
+                    Err(e) => fail(ErrorCode::Storage, &e.to_string()),
                 }
-
-                ok(SendResult {
-                    outbox_id,
-                    status: STATUS_SENT.to_string(),
-                    retries: outbox.retries,
-                    provider_message_id: Some(provider_message_id),
-                    next_attempt_at: now_ts,
-                })
             }
             Err(provider_err) => {
                 let next_retries = outbox.retries + 1;
@@ -721,7 +743,7 @@ impl<'a> EmailPlugin<'a> {
                         outbox.account_id,
                         redact_email(&outbox.to_recipients),
                         provider_err.message,
-                        provider_err.debug_message
+                        sanitize_debug_message(&provider_err.debug_message)
                     ),
                 );
                 log_structured(
@@ -732,31 +754,35 @@ impl<'a> EmailPlugin<'a> {
                     &format!("send-{}", now_ts),
                     Some(code.clone()),
                 );
-                if let Err(e) = self.repo.update_outbox_status(&UpdateOutboxStatus {
-                    id: outbox_id,
-                    status: STATUS_FAILED.to_string(),
-                    retries: next_retries,
-                    last_error: Some(provider_err.message.clone()),
-                    provider_message_id: None,
-                    next_attempt_at,
-                    now_ts,
-                }) {
-                    return fail(ErrorCode::Storage, &e.to_string());
-                }
-
-                ApiResponse {
-                    ok: false,
-                    data: Some(SendResult {
-                        outbox_id,
+                let updated = self.repo.update_outbox_status_if_current(
+                    &UpdateOutboxStatus {
+                        id: outbox_id,
                         status: STATUS_FAILED.to_string(),
                         retries: next_retries,
+                        last_error: Some(provider_err.message.clone()),
                         provider_message_id: None,
                         next_attempt_at,
-                    }),
-                    error: Some(ApiError {
-                        code,
-                        message: provider_err.message,
-                    }),
+                        now_ts,
+                    },
+                    STATUS_SENDING,
+                );
+                match updated {
+                    Ok(true) => ApiResponse {
+                        ok: false,
+                        data: Some(SendResult {
+                            outbox_id,
+                            status: STATUS_FAILED.to_string(),
+                            retries: next_retries,
+                            provider_message_id: None,
+                            next_attempt_at,
+                        }),
+                        error: Some(ApiError {
+                            code,
+                            message: provider_err.message,
+                        }),
+                    },
+                    Ok(false) => fail(ErrorCode::Validation, "outbox_state_changed_before_finalize"),
+                    Err(e) => fail(ErrorCode::Storage, &e.to_string()),
                 }
             }
         }
@@ -794,10 +820,12 @@ impl<'a> EmailPlugin<'a> {
             debug_message: format!("invalid recipient address: {e}"),
         })?);
 
+        let idempotency_key = build_outbox_idempotency_key(outbox);
         let mut msg_builder = SmtpMessage::builder()
             .from(from)
             .to(to)
-            .subject(outbox.subject.clone());
+            .subject(outbox.subject.clone())
+            .message_id(Some(format!("<{idempotency_key}@prx-email.local>")));
         if let Some(in_reply_to) = &outbox.in_reply_to_message_id {
             msg_builder = msg_builder.in_reply_to(in_reply_to.clone());
             if let Ok(Some(parent)) = self.repo.get_message(outbox.account_id, in_reply_to) {
@@ -1043,7 +1071,7 @@ fn parse_mime_message(
     let message_id = message
         .message_id()
         .map(|v| v.to_string())
-        .unwrap_or_else(|| format!("generated-{}", raw.len()));
+        .unwrap_or_else(|| fallback_message_id(raw, account_id, now_ts));
 
     let attachments = message
         .attachments()
@@ -1260,6 +1288,45 @@ fn build_references_chain(existing_references: Option<&str>, parent_message_id: 
     refs.join(" ")
 }
 
+fn sanitize_limit(limit: i64) -> Result<i64, ApiError> {
+    if !(MIN_LIST_LIMIT..=MAX_LIST_LIMIT).contains(&limit) {
+        return Err(ApiError {
+            code: ErrorCode::Validation,
+            message: format!("limit_out_of_range:{} (expected {}..={})", limit, MIN_LIST_LIMIT, MAX_LIST_LIMIT),
+        });
+    }
+    Ok(limit)
+}
+
+fn fallback_message_id(raw: &[u8], account_id: i64, now_ts: i64) -> String {
+    let digest = Sha256::digest(raw);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    format!("generated-{account_id}-{now_ts}-{hex}")
+}
+
+fn build_outbox_idempotency_key(outbox: &OutboxMessage) -> String {
+    format!("outbox-{}-{}", outbox.id, outbox.retries)
+}
+
+fn sanitize_debug_message(raw: &str) -> String {
+    let mut redacted = raw.replace(['\n', '\r'], " ");
+    for token in ["authorization:", "bearer ", "password="] {
+        if let Some(idx) = redacted.to_ascii_lowercase().find(token) {
+            redacted.truncate(idx + token.len());
+            redacted.push_str("[REDACTED]");
+            break;
+        }
+    }
+    if redacted.len() > MAX_DEBUG_MESSAGE_LEN {
+        redacted.truncate(MAX_DEBUG_MESSAGE_LEN);
+        redacted.push('…');
+    }
+    redacted
+}
+
 fn ok<T>(data: T) -> ApiResponse<T> {
     ApiResponse {
         ok: true,
@@ -1383,7 +1450,10 @@ fn log_debug(context: &str, details: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_references_chain, parse_mime_message, AttachmentPolicy, ReplyEmailRequest};
+    use super::{
+        build_references_chain, parse_mime_message, AttachmentPolicy, ListMessagesRequest,
+        ReplyEmailRequest, SearchMessagesRequest,
+    };
     use crate::db::{EmailRepository, EmailStore, NewAccount, NewMessage};
     use crate::plugin::EmailPlugin;
 
@@ -1453,6 +1523,86 @@ mod tests {
             .expect("get")
             .expect("exists");
         assert_eq!(outbox.in_reply_to_message_id.as_deref(), Some("<root@example.com>"));
+    }
+
+    #[test]
+    fn parse_mime_fallback_message_id_is_stable_and_unique_for_different_payloads() {
+        let raw_a = b"From: a@example.com\r\nSubject: A\r\n\r\nhello";
+        let raw_b = b"From: b@example.com\r\nSubject: B\r\n\r\nworld";
+        assert_eq!(raw_a.len(), raw_b.len());
+
+        let parsed_a = parse_mime_message(raw_a, None, &AttachmentPolicy::default(), 9, 100).expect("a");
+        let parsed_b = parse_mime_message(raw_b, None, &AttachmentPolicy::default(), 9, 100).expect("b");
+
+        assert!(parsed_a.message_id.starts_with("generated-9-100-"));
+        assert!(parsed_b.message_id.starts_with("generated-9-100-"));
+        assert_ne!(parsed_a.message_id, parsed_b.message_id);
+    }
+
+    #[test]
+    fn list_search_reject_out_of_range_limit() {
+        let store = EmailStore::open_in_memory().expect("open");
+        store.migrate().expect("migrate");
+        let repo = EmailRepository::new(&store);
+        let account_id = repo
+            .create_account(&NewAccount {
+                email: "limit@example.com".to_string(),
+                display_name: None,
+                now_ts: 1,
+            })
+            .expect("create account");
+        repo.set_account_feature_flag(account_id, "inbox_read", true, 1)
+            .expect("enable read");
+        repo.set_account_feature_flag(account_id, "inbox_search", true, 1)
+            .expect("enable search");
+        let plugin = EmailPlugin::new(repo);
+
+        let list_err = plugin
+            .list(ListMessagesRequest { account_id, limit: 0 })
+            .expect_err("list limit should fail");
+        assert_eq!(list_err.code, super::ErrorCode::Validation);
+
+        let search_err = plugin
+            .search(SearchMessagesRequest {
+                account_id,
+                query: "x".to_string(),
+                limit: 501,
+            })
+            .expect_err("search limit should fail");
+        assert_eq!(search_err.code, super::ErrorCode::Validation);
+    }
+
+    #[test]
+    fn run_sync_runner_respects_max_concurrency_cap() {
+        let store = EmailStore::open_in_memory().expect("open");
+        store.migrate().expect("migrate");
+        let repo = EmailRepository::new(&store);
+        let plugin = EmailPlugin::new(repo);
+
+        let jobs = vec![
+            super::SyncJob {
+                account_id: 1,
+                folder: "INBOX".to_string(),
+                max_messages: 10,
+            },
+            super::SyncJob {
+                account_id: 2,
+                folder: "INBOX".to_string(),
+                max_messages: 10,
+            },
+            super::SyncJob {
+                account_id: 3,
+                folder: "INBOX".to_string(),
+                max_messages: 10,
+            },
+        ];
+        let cfg = super::SyncRunnerConfig {
+            max_concurrency: 2,
+            base_backoff_seconds: 1,
+            max_backoff_seconds: 10,
+        };
+        let report = plugin.run_sync_runner(&jobs, 10, &cfg);
+        assert_eq!(report.attempted, 2);
     }
 
     #[test]

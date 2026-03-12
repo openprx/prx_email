@@ -63,10 +63,12 @@ impl EmailStore {
         let sql_0002 = include_str!("../../migrations/0002_outbox.sql");
         let sql_0003 = include_str!("../../migrations/0003_rollout.sql");
         let sql_0005 = include_str!("../../migrations/0005_m41.sql");
+        let sql_0006 = include_str!("../../migrations/0006_m42_perf.sql");
         self.conn.execute_batch(sql_0001)?;
         self.conn.execute_batch(sql_0002)?;
         self.conn.execute_batch(sql_0003)?;
         self.conn.execute_batch(sql_0005)?;
+        self.conn.execute_batch(sql_0006)?;
         ensure_column(&self.conn, "messages", "body_html", "TEXT")?;
         ensure_column(&self.conn, "messages", "attachments_json", "TEXT")?;
         ensure_column(&self.conn, "messages", "references_header", "TEXT")?;
