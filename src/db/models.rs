@@ -39,6 +39,7 @@ pub struct AttachmentMeta {
     pub filename: Option<String>,
     pub content_type: Option<String>,
     pub size: usize,
+    pub local_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +55,7 @@ pub struct Message {
     pub body_text: Option<String>,
     pub body_html: Option<String>,
     pub attachments_json: Option<String>,
+    pub references_header: Option<String>,
     pub received_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -71,6 +73,7 @@ pub struct NewMessage {
     pub body_text: Option<String>,
     pub body_html: Option<String>,
     pub attachments_json: Option<String>,
+    pub references_header: Option<String>,
     pub received_at: Option<i64>,
     pub now_ts: i64,
 }

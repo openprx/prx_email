@@ -37,10 +37,34 @@ impl<'a> EmailRepository<'a> {
         Ok(self.store.conn().last_insert_rowid())
     }
 
+    pub fn get_folder_by_path(&self, account_id: i64, path: &str) -> Result<Option<Folder>, RepoError> {
+        let result = self
+            .store
+            .conn()
+            .query_row(
+                "SELECT id, account_id, name, path, created_at, updated_at
+                 FROM folders WHERE account_id = ?1 AND path = ?2
+                 ORDER BY id ASC LIMIT 1",
+                params![account_id, path],
+                |r| {
+                    Ok(Folder {
+                        id: r.get(0)?,
+                        account_id: r.get(1)?,
+                        name: r.get(2)?,
+                        path: r.get(3)?,
+                        created_at: r.get(4)?,
+                        updated_at: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(result)
+    }
+
     pub fn upsert_message(&self, input: &NewMessage) -> Result<i64, RepoError> {
         self.store.conn().execute(
-            "INSERT INTO messages (account_id, folder_id, message_id, subject, sender, recipients, snippet, body_text, body_html, attachments_json, received_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+            "INSERT INTO messages (account_id, folder_id, message_id, subject, sender, recipients, snippet, body_text, body_html, attachments_json, references_header, received_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
              ON CONFLICT(account_id, message_id) DO UPDATE SET
                 folder_id=excluded.folder_id,
                 subject=excluded.subject,
@@ -50,6 +74,7 @@ impl<'a> EmailRepository<'a> {
                 body_text=excluded.body_text,
                 body_html=excluded.body_html,
                 attachments_json=excluded.attachments_json,
+                references_header=excluded.references_header,
                 received_at=excluded.received_at,
                 updated_at=excluded.updated_at",
             params![
@@ -63,6 +88,7 @@ impl<'a> EmailRepository<'a> {
                 input.body_text,
                 input.body_html,
                 input.attachments_json,
+                input.references_header,
                 input.received_at,
                 input.now_ts
             ],
@@ -78,7 +104,7 @@ impl<'a> EmailRepository<'a> {
 
     pub fn list_messages(&self, account_id: i64, limit: i64) -> Result<Vec<Message>, RepoError> {
         let mut stmt = self.store.conn().prepare(
-            "SELECT id, account_id, folder_id, message_id, subject, sender, recipients, snippet, body_text, body_html, attachments_json, received_at, created_at, updated_at
+            "SELECT id, account_id, folder_id, message_id, subject, sender, recipients, snippet, body_text, body_html, attachments_json, references_header, received_at, created_at, updated_at
              FROM messages WHERE account_id = ?1 ORDER BY received_at DESC, id DESC LIMIT ?2",
         )?;
 
@@ -95,7 +121,7 @@ impl<'a> EmailRepository<'a> {
             .store
             .conn()
             .query_row(
-                "SELECT id, account_id, folder_id, message_id, subject, sender, recipients, snippet, body_text, body_html, attachments_json, received_at, created_at, updated_at
+                "SELECT id, account_id, folder_id, message_id, subject, sender, recipients, snippet, body_text, body_html, attachments_json, references_header, received_at, created_at, updated_at
                  FROM messages WHERE account_id = ?1 AND message_id = ?2",
                 params![account_id, message_id],
                 map_message,
@@ -112,7 +138,7 @@ impl<'a> EmailRepository<'a> {
     ) -> Result<Vec<Message>, RepoError> {
         let like = format!("%{}%", query);
         let mut stmt = self.store.conn().prepare(
-            "SELECT id, account_id, folder_id, message_id, subject, sender, recipients, snippet, body_text, body_html, attachments_json, received_at, created_at, updated_at
+            "SELECT id, account_id, folder_id, message_id, subject, sender, recipients, snippet, body_text, body_html, attachments_json, references_header, received_at, created_at, updated_at
              FROM messages
              WHERE account_id = ?1 AND (subject LIKE ?2 OR sender LIKE ?2 OR snippet LIKE ?2)
              ORDER BY received_at DESC, id DESC LIMIT ?3",
@@ -405,9 +431,10 @@ fn map_message(r: &rusqlite::Row<'_>) -> Result<Message, rusqlite::Error> {
         body_text: r.get(8)?,
         body_html: r.get(9)?,
         attachments_json: r.get(10)?,
-        received_at: r.get(11)?,
-        created_at: r.get(12)?,
-        updated_at: r.get(13)?,
+        references_header: r.get(11)?,
+        received_at: r.get(12)?,
+        created_at: r.get(13)?,
+        updated_at: r.get(14)?,
     })
 }
 

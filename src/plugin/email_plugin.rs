@@ -7,6 +7,7 @@ use rustls_connector::RustlsConnector;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 
 use crate::db::{
     AttachmentMeta, EmailRepository, Message, NewMessage, NewOutboxMessage, OutboxMessage,
@@ -41,15 +42,22 @@ pub struct SmtpConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct AttachmentStoreConfig {
+    pub enabled: bool,
+    pub dir: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct EmailTransportConfig {
     pub imap: ImapConfig,
     pub smtp: SmtpConfig,
+    pub attachment_store: Option<AttachmentStoreConfig>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SyncRequest {
     pub account_id: i64,
-    pub folder_id: Option<i64>,
+    pub folder: Option<String>,
     pub cursor: Option<String>,
     pub now_ts: i64,
     pub max_messages: usize,
@@ -177,12 +185,22 @@ impl<'a> EmailPlugin<'a> {
         let mut session = client
             .login(&cfg.imap.user, &cfg.imap.pass)
             .map_err(|e| network_err(e.0))?;
-        session.select("INBOX").map_err(network_err)?;
+        let folder_path = req.folder.unwrap_or_else(|| "INBOX".to_string());
+        session.select(&folder_path).map_err(network_err)?;
 
+        let folder_id = self.ensure_folder(req.account_id, &folder_path, req.now_ts)?;
         let start_uid = req
             .cursor
             .as_deref()
             .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| {
+                self.repo
+                    .get_sync_state(req.account_id, Some(folder_id))
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.cursor)
+                    .and_then(|v| v.parse::<u32>().ok())
+            })
             .unwrap_or(0);
         let uid_criteria = format!("UID {}:*", start_uid.saturating_add(1));
         let mut uids: Vec<u32> = session
@@ -202,7 +220,13 @@ impl<'a> EmailPlugin<'a> {
                 .uid_fetch(seq.as_str(), "UID RFC822")
                 .map_err(network_err)?;
             for fetch in fetches.iter() {
-                if let Some(msg) = parse_imap_fetch(req.account_id, req.folder_id, req.now_ts, fetch) {
+                if let Some(msg) = parse_imap_fetch(
+                    req.account_id,
+                    Some(folder_id),
+                    req.now_ts,
+                    fetch,
+                    cfg.attachment_store.as_ref(),
+                ) {
                     self.repo.upsert_message(&msg).map_err(storage_err)?;
                 }
                 if let Some(found_uid) = fetch.uid {
@@ -216,7 +240,7 @@ impl<'a> EmailPlugin<'a> {
         self.repo
             .upsert_sync_state(&UpsertSyncState {
                 account_id: req.account_id,
-                folder_id: req.folder_id,
+                folder_id: Some(folder_id),
                 cursor: Some(max_uid.to_string()),
                 last_synced_at: Some(req.now_ts),
                 status: Some("ok".to_string()),
@@ -224,6 +248,25 @@ impl<'a> EmailPlugin<'a> {
             })
             .map_err(storage_err)?;
         Ok(())
+    }
+
+    fn ensure_folder(&self, account_id: i64, folder_path: &str, now_ts: i64) -> Result<i64, ApiError> {
+        if let Some(folder) = self
+            .repo
+            .get_folder_by_path(account_id, folder_path)
+            .map_err(storage_err)?
+        {
+            return Ok(folder.id);
+        }
+
+        self.repo
+            .create_folder(&crate::db::NewFolder {
+                account_id,
+                name: folder_path.to_string(),
+                path: folder_path.to_string(),
+                now_ts,
+            })
+            .map_err(storage_err)
     }
 
     pub fn ingest_message(&self, msg: NewMessage) -> Result<i64, ApiError> {
@@ -502,6 +545,12 @@ impl<'a> EmailPlugin<'a> {
             .subject(outbox.subject.clone());
         if let Some(in_reply_to) = &outbox.in_reply_to_message_id {
             msg_builder = msg_builder.in_reply_to(in_reply_to.clone());
+            if let Ok(Some(parent)) = self.repo.get_message(outbox.account_id, in_reply_to) {
+                let references = build_references_chain(parent.references_header.as_deref(), &parent.message_id);
+                if !references.is_empty() {
+                    msg_builder = msg_builder.references(references);
+                }
+            }
         }
 
         let body = SinglePart::builder()
@@ -568,9 +617,15 @@ fn read_attachment_bytes(input: &AttachmentInput) -> Result<Vec<u8>, ProviderErr
     }
 }
 
-fn parse_imap_fetch(account_id: i64, folder_id: Option<i64>, now_ts: i64, fetch: &Fetch) -> Option<NewMessage> {
+fn parse_imap_fetch(
+    account_id: i64,
+    folder_id: Option<i64>,
+    now_ts: i64,
+    fetch: &Fetch,
+    attachment_store: Option<&AttachmentStoreConfig>,
+) -> Option<NewMessage> {
     let raw = fetch.body()?;
-    let parsed = parse_mime_message(raw)?;
+    let parsed = parse_mime_message(raw, attachment_store, account_id, now_ts)?;
     Some(NewMessage {
         account_id,
         folder_id,
@@ -582,6 +637,7 @@ fn parse_imap_fetch(account_id: i64, folder_id: Option<i64>, now_ts: i64, fetch:
         body_text: parsed.body_text,
         body_html: parsed.body_html,
         attachments_json: Some(serde_json::to_string(&parsed.attachments).ok()?),
+        references_header: parsed.references_header,
         received_at: Some(now_ts),
         now_ts,
     })
@@ -596,10 +652,16 @@ struct ParsedMime {
     snippet: Option<String>,
     body_text: Option<String>,
     body_html: Option<String>,
+    references_header: Option<String>,
     attachments: Vec<AttachmentMeta>,
 }
 
-fn parse_mime_message(raw: &[u8]) -> Option<ParsedMime> {
+fn parse_mime_message(
+    raw: &[u8],
+    attachment_store: Option<&AttachmentStoreConfig>,
+    account_id: i64,
+    now_ts: i64,
+) -> Option<ParsedMime> {
     let message = MessageParser::default().parse(raw)?;
     let body_text = message
         .text_bodies()
@@ -615,28 +677,45 @@ fn parse_mime_message(raw: &[u8]) -> Option<ParsedMime> {
         .map(|v| v.chars().take(120).collect::<String>())
         .or_else(|| body_html.as_ref().map(|v| v.chars().take(120).collect::<String>()));
 
+    let message_id = message
+        .message_id()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| format!("generated-{}", raw.len()));
+
     let attachments = message
         .attachments()
-        .map(|part| AttachmentMeta {
-            filename: part.attachment_name().map(|n| n.to_string()),
-            content_type: part
-                .content_type()
-                .map(|c| format!("{}/{}", c.c_type, c.c_subtype.clone().unwrap_or_else(|| "octet-stream".into()))),
-            size: part.contents().len(),
+        .enumerate()
+        .map(|(idx, part)| {
+            let filename = part.attachment_name().map(|n| n.to_string());
+            let local_path = persist_attachment(
+                attachment_store,
+                account_id,
+                &message_id,
+                idx,
+                filename.as_deref(),
+                part.contents(),
+                now_ts,
+            );
+            AttachmentMeta {
+                filename,
+                content_type: part
+                    .content_type()
+                    .map(|c| format!("{}/{}", c.c_type, c.c_subtype.clone().unwrap_or_else(|| "octet-stream".into()))),
+                size: part.contents().len(),
+                local_path,
+            }
         })
         .collect::<Vec<_>>();
 
     Some(ParsedMime {
-        message_id: message
-            .message_id()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| format!("generated-{}", raw.len())),
+        message_id,
         subject: message.subject().map(|v| v.to_string()),
         sender: first_address(message.from()),
         recipients: flatten_addresses(message.to()),
         snippet,
         body_text,
         body_html,
+        references_header: message.references().as_text().map(|v| v.to_string()),
         attachments,
     })
 }
@@ -682,6 +761,77 @@ fn flatten_addresses(address: Option<&Address<'_>>) -> Option<String> {
 
 fn first_address(address: Option<&Address<'_>>) -> Option<String> {
     flatten_addresses(address).and_then(|v| v.split(',').next().map(|s| s.trim().to_string()))
+}
+
+fn persist_attachment(
+    attachment_store: Option<&AttachmentStoreConfig>,
+    account_id: i64,
+    message_id: &str,
+    index: usize,
+    filename: Option<&str>,
+    bytes: &[u8],
+    now_ts: i64,
+) -> Option<String> {
+    let cfg = attachment_store?;
+    if !cfg.enabled {
+        return None;
+    }
+
+    let root = Path::new(&cfg.dir);
+    let safe_message_id = sanitize_path_component(message_id);
+    let safe_filename = sanitize_path_component(filename.unwrap_or("attachment.bin"));
+    let account_dir = root.join(account_id.to_string()).join(safe_message_id);
+    fs::create_dir_all(&account_dir).ok()?;
+    let path: PathBuf = account_dir.join(format!("{}-{}-{}", now_ts, index, safe_filename));
+    fs::write(&path, bytes).ok()?;
+    Some(path.to_string_lossy().to_string())
+}
+
+fn sanitize_path_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn extract_message_ids(header_value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    for ch in header_value.chars() {
+        if ch == '<' {
+            in_token = true;
+            current.clear();
+            current.push(ch);
+        } else if ch == '>' && in_token {
+            current.push(ch);
+            out.push(current.clone());
+            in_token = false;
+            current.clear();
+        } else if in_token {
+            current.push(ch);
+        }
+    }
+    out
+}
+
+fn build_references_chain(existing_references: Option<&str>, parent_message_id: &str) -> String {
+    let mut refs = existing_references
+        .map(extract_message_ids)
+        .unwrap_or_default();
+    if !refs.iter().any(|v| v == parent_message_id) {
+        refs.push(parent_message_id.to_string());
+    }
+    refs.join(" ")
 }
 
 fn ok<T>(data: T) -> ApiResponse<T> {
@@ -733,18 +883,27 @@ fn network_err_provider(e: impl std::fmt::Display) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_mime_message, ReplyEmailRequest};
+    use super::{build_references_chain, parse_mime_message, ReplyEmailRequest};
     use crate::db::{EmailRepository, EmailStore, NewAccount, NewMessage};
     use crate::plugin::EmailPlugin;
 
     #[test]
     fn parse_mime_extracts_text_html_and_attachments() {
         let raw = b"From: Alice <alice@example.com>\r\nTo: Bob <bob@example.com>\r\nSubject: Hello\r\nMessage-ID: <m1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=abc\r\n\r\n--abc\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nPlain body\r\n--abc\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body>HTML body</body></html>\r\n--abc\r\nContent-Type: text/plain; name=file.txt\r\nContent-Disposition: attachment; filename=file.txt\r\n\r\nhello\r\n--abc--\r\n";
-        let parsed = parse_mime_message(raw).expect("parse");
+        let parsed = parse_mime_message(raw, None, 1, 1).expect("parse");
         assert_eq!(parsed.body_text.as_deref(), Some("Plain body"));
         assert!(parsed.body_html.is_some());
         assert_eq!(parsed.attachments.len(), 1);
         assert_eq!(parsed.attachments[0].filename.as_deref(), Some("file.txt"));
+        assert!(parsed.attachments[0].local_path.is_none());
+    }
+
+    #[test]
+    fn references_chain_appends_parent_message_id() {
+        let refs = build_references_chain(Some("<a@x> <b@x>"), "<c@x>");
+        assert_eq!(refs, "<a@x> <b@x> <c@x>");
+        let no_dup = build_references_chain(Some("<a@x> <c@x>"), "<c@x>");
+        assert_eq!(no_dup, "<a@x> <c@x>");
     }
 
     #[test]
@@ -773,6 +932,7 @@ mod tests {
             body_text: Some("root".to_string()),
             body_html: None,
             attachments_json: None,
+            references_header: None,
             received_at: Some(1),
             now_ts: 1,
         })

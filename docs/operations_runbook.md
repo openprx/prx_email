@@ -1,4 +1,4 @@
-# PRX Email M3 Operations Runbook (SQLite-only)
+# PRX Email M4.1 Operations Runbook (SQLite-only)
 
 ## Scope
 
@@ -22,6 +22,32 @@ If needed, create the store with explicit options via `StoreConfig`:
 - `synchronous` (`Full`, `Normal`, `Off`)
 
 Recommended defaults for production are the current defaults in `StoreConfig::default()`.
+
+## M4.1 Operational Notes
+
+### Reply threading (`References`)
+
+- `reply` now sends both:
+  - `In-Reply-To: <parent-message-id>`
+  - `References: <existing-parent-references...> <parent-message-id>`
+- This improves thread stitching across Gmail/Outlook/IMAP clients.
+
+### Multi-folder sync
+
+- `email.sync` now accepts a folder path (for example `INBOX`, `Sent`).
+- Sync cursor is tracked per `(account_id, folder_id)` in `sync_state`.
+- If request cursor is omitted, last folder cursor is reused automatically.
+
+### Attachment local persistence (optional)
+
+- Configure attachment persistence in transport config:
+  - `attachment_store.enabled = true`
+  - `attachment_store.dir = /path/to/attachment-cache`
+- On inbound sync, each attachment metadata includes `local_path` when write succeeds.
+- Suggested ops policy:
+  - keep directory on local encrypted disk
+  - schedule periodic cleanup (age/size caps)
+  - back up DB metadata and files together for consistency
 
 ## Migration Procedure
 

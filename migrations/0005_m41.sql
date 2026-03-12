@@ -1,0 +1,1 @@
+-- M4.1 schema changes are applied via ensure_column() in storage migration.

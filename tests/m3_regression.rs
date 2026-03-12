@@ -31,6 +31,7 @@ fn inbox_list_get_search_regression() {
             body_text: Some("body-1".to_string()),
             body_html: None,
             attachments_json: None,
+            references_header: None,
             received_at: Some(10),
             now_ts: 10,
         })
@@ -47,6 +48,7 @@ fn inbox_list_get_search_regression() {
             body_text: Some("body-2".to_string()),
             body_html: None,
             attachments_json: None,
+            references_header: None,
             received_at: Some(20),
             now_ts: 20,
         })
@@ -63,6 +65,7 @@ fn inbox_list_get_search_regression() {
             body_text: Some("body-x".to_string()),
             body_html: None,
             attachments_json: None,
+            references_header: None,
             received_at: Some(30),
             now_ts: 30,
         })
@@ -185,6 +188,7 @@ fn send_reply_regression_with_safe_defaults_and_enablement() {
             body_text: Some("hello".to_string()),
             body_html: None,
             attachments_json: None,
+            references_header: None,
             received_at: Some(103),
             now_ts: 103,
         })
