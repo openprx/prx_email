@@ -1,35 +1,12 @@
 package prx:plugin@0.1.0;
 
-interface log {}
-interface config {}
-interface kv {}
-interface http-outbound {}
-interface memory {}
-interface events {}
-
-interface tool-exports {
-    record tool-spec {
-        name: string,
-        description: string,
-        parameters-schema: string,
-    }
-
-    record plugin-result {
-        success: bool,
-        output: string,
-        error: option<string>,
-    }
-
-    get-spec: func() -> tool-spec;
-    execute: func(args: string) -> plugin-result;
-}
-
 world tool {
-    import log;
-    import config;
-    import kv;
-    import http-outbound;
-    import memory;
-    import events;
+    import prx:host/log@0.1.0;
+    import prx:host/config@0.1.0;
+    import prx:host/kv@0.1.0;
+    import prx:host/http-outbound@0.1.0;
+    import prx:host/memory@0.1.0;
+    import prx:host/events@0.1.0;
+
     export tool-exports;
 }

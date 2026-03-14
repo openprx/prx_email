@@ -274,6 +274,7 @@ mod bindings {
     wit_bindgen::generate!({
         path: "wit",
         world: "tool",
+        generate_all,
     });
 }
 
