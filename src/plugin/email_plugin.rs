@@ -1,10 +1,12 @@
 use base64::Engine;
-use imap::types::Fetch;
 use imap::Authenticator;
-use lettre::message::{header::ContentType, Attachment, Mailbox, Message as SmtpMessage, MultiPart, SinglePart};
+use imap::types::Fetch;
+use lettre::message::{
+    Attachment, Mailbox, Message as SmtpMessage, MultiPart, SinglePart, header::ContentType,
+};
 use lettre::{
-    transport::smtp::authentication::{Credentials, Mechanism},
     SmtpTransport, Transport,
+    transport::smtp::authentication::{Credentials, Mechanism},
 };
 use mail_parser::{Address, MessageParser, MimeHeaders};
 use rustls_connector::RustlsConnector;
@@ -144,7 +146,12 @@ pub struct RefreshedOAuthToken {
 }
 
 pub trait OAuthRefreshProvider {
-    fn refresh_token(&self, protocol: &str, user: &str, current_token: &str) -> Result<RefreshedOAuthToken, ApiError>;
+    fn refresh_token(
+        &self,
+        protocol: &str,
+        user: &str,
+        current_token: &str,
+    ) -> Result<RefreshedOAuthToken, ApiError>;
 }
 
 #[derive(Debug, Clone)]
@@ -302,7 +309,9 @@ impl<'a> EmailPlugin<'a> {
 
     pub fn reload_auth_from_env(&self, prefix: &str) {
         let mut cfg_guard = self.config.borrow_mut();
-        let Some(cfg) = cfg_guard.as_mut() else { return; };
+        let Some(cfg) = cfg_guard.as_mut() else {
+            return;
+        };
 
         let imap_key = format!("{}_IMAP_OAUTH_TOKEN", prefix);
         if let Ok(v) = std::env::var(&imap_key) {
@@ -317,12 +326,16 @@ impl<'a> EmailPlugin<'a> {
         if let Ok(v) = std::env::var(format!("{}_IMAP_OAUTH_EXPIRES_AT", prefix))
             && let Ok(ts) = v.parse::<i64>()
         {
-            self.oauth_expiry_ts.borrow_mut().insert("imap".to_string(), ts);
+            self.oauth_expiry_ts
+                .borrow_mut()
+                .insert("imap".to_string(), ts);
         }
         if let Ok(v) = std::env::var(format!("{}_SMTP_OAUTH_EXPIRES_AT", prefix))
             && let Ok(ts) = v.parse::<i64>()
         {
-            self.oauth_expiry_ts.borrow_mut().insert("smtp".to_string(), ts);
+            self.oauth_expiry_ts
+                .borrow_mut()
+                .insert("smtp".to_string(), ts);
         }
     }
 
@@ -369,15 +382,25 @@ impl<'a> EmailPlugin<'a> {
             match result {
                 Ok(_) => {
                     succeeded += 1;
-                    self.scheduler_state.borrow_mut().insert(key.clone(), (now_ts, 0));
-                    log_structured("sync_runner_ok", job.account_id, Some(&job.folder), None, &run_id, None);
+                    self.scheduler_state
+                        .borrow_mut()
+                        .insert(key.clone(), (now_ts, 0));
+                    log_structured(
+                        "sync_runner_ok",
+                        job.account_id,
+                        Some(&job.folder),
+                        None,
+                        &run_id,
+                        None,
+                    );
                 }
                 Err(err) => {
                     failed += 1;
                     self.metrics.borrow_mut().sync_failures += 1;
                     let next_fails = fails + 1;
                     let exp = i64::pow(2, next_fails.min(6));
-                    let backoff = (runner_cfg.base_backoff_seconds * exp).min(runner_cfg.max_backoff_seconds);
+                    let backoff =
+                        (runner_cfg.base_backoff_seconds * exp).min(runner_cfg.max_backoff_seconds);
                     self.scheduler_state
                         .borrow_mut()
                         .insert(key.clone(), (now_ts + backoff, next_fails));
@@ -412,7 +435,8 @@ impl<'a> EmailPlugin<'a> {
         validate_transport_config(cfg)?;
 
         let tls = RustlsConnector::default();
-        let tcp = TcpStream::connect((cfg.imap.host.as_str(), cfg.imap.port)).map_err(network_err)?;
+        let tcp =
+            TcpStream::connect((cfg.imap.host.as_str(), cfg.imap.port)).map_err(network_err)?;
         let tls_stream = tls.connect(&cfg.imap.host, tcp).map_err(network_err)?;
         let client = imap::Client::new(tls_stream);
         let mut session = imap_login(client, &cfg.imap)?;
@@ -483,7 +507,12 @@ impl<'a> EmailPlugin<'a> {
         Ok(())
     }
 
-    fn ensure_folder(&self, account_id: i64, folder_path: &str, now_ts: i64) -> Result<i64, ApiError> {
+    fn ensure_folder(
+        &self,
+        account_id: i64,
+        folder_path: &str,
+        now_ts: i64,
+    ) -> Result<i64, ApiError> {
         if let Some(folder) = self
             .repo
             .get_folder_by_path(account_id, folder_path)
@@ -531,11 +560,21 @@ impl<'a> EmailPlugin<'a> {
 
     pub fn send(&self, req: SendEmailRequest) -> ApiResponse<SendResult> {
         if let Err(e) = self.require_feature(req.account_id, FEATURE_EMAIL_SEND) {
-            return ApiResponse { ok: false, data: None, error: Some(e) };
+            return ApiResponse {
+                ok: false,
+                data: None,
+                error: Some(e),
+            };
         }
 
-        if req.to.trim().is_empty() || req.subject.trim().is_empty() || req.body_text.trim().is_empty() {
-            return fail(ErrorCode::Validation, "to/subject/body_text cannot be empty");
+        if req.to.trim().is_empty()
+            || req.subject.trim().is_empty()
+            || req.body_text.trim().is_empty()
+        {
+            return fail(
+                ErrorCode::Validation,
+                "to/subject/body_text cannot be empty",
+            );
         }
 
         let outbox_id = match self.repo.create_outbox_message(&NewOutboxMessage {
@@ -559,33 +598,49 @@ impl<'a> EmailPlugin<'a> {
 
     pub fn reply(&self, req: ReplyEmailRequest) -> ApiResponse<SendResult> {
         if let Err(e) = self.require_feature(req.account_id, FEATURE_EMAIL_REPLY) {
-            return ApiResponse { ok: false, data: None, error: Some(e) };
+            return ApiResponse {
+                ok: false,
+                data: None,
+                error: Some(e),
+            };
         }
 
         if req.in_reply_to_message_id.trim().is_empty() || req.body_text.trim().is_empty() {
-            return fail(ErrorCode::Validation, "in_reply_to_message_id/body_text cannot be empty");
+            return fail(
+                ErrorCode::Validation,
+                "in_reply_to_message_id/body_text cannot be empty",
+            );
         }
 
-        let parent = match self.repo.get_message(req.account_id, &req.in_reply_to_message_id) {
+        let parent = match self
+            .repo
+            .get_message(req.account_id, &req.in_reply_to_message_id)
+        {
             Ok(Some(m)) => m,
             Ok(None) => {
                 return fail(
                     ErrorCode::Validation,
                     "in_reply_to_message_id does not exist for this account",
-                )
+                );
             }
             Err(e) => return fail(ErrorCode::Storage, &e.to_string()),
         };
 
         let to = parent.sender.unwrap_or_default();
         if to.trim().is_empty() {
-            return fail(ErrorCode::Validation, "cannot infer reply recipient from parent sender");
+            return fail(
+                ErrorCode::Validation,
+                "cannot infer reply recipient from parent sender",
+            );
         }
 
         let outbox_id = match self.repo.create_outbox_message(&NewOutboxMessage {
             account_id: req.account_id,
             to_recipients: to,
-            subject: format!("Re: {}", parent.subject.unwrap_or_else(|| "(no subject)".to_string())),
+            subject: format!(
+                "Re: {}",
+                parent.subject.unwrap_or_else(|| "(no subject)".to_string())
+            ),
             body_text: req.body_text,
             in_reply_to_message_id: Some(req.in_reply_to_message_id),
             status: STATUS_PENDING.to_string(),
@@ -608,7 +663,11 @@ impl<'a> EmailPlugin<'a> {
             Err(e) => return fail(ErrorCode::Storage, &e.to_string()),
         };
         if let Err(e) = self.require_feature(outbox.account_id, FEATURE_OUTBOX_RETRY) {
-            return ApiResponse { ok: false, data: None, error: Some(e) };
+            return ApiResponse {
+                ok: false,
+                data: None,
+                error: Some(e),
+            };
         }
         if !matches!(outbox.status.as_str(), STATUS_PENDING | STATUS_FAILED) {
             return fail(ErrorCode::Validation, "retry_not_allowed_for_status");
@@ -624,7 +683,12 @@ impl<'a> EmailPlugin<'a> {
         self.repo.get_outbox_message(outbox_id).map_err(storage_err)
     }
 
-    pub fn set_feature_default(&self, feature_key: &str, enabled: bool, now_ts: i64) -> Result<(), ApiError> {
+    pub fn set_feature_default(
+        &self,
+        feature_key: &str,
+        enabled: bool,
+        now_ts: i64,
+    ) -> Result<(), ApiError> {
         self.repo
             .set_feature_default(feature_key, enabled, now_ts)
             .map_err(storage_err)
@@ -674,7 +738,11 @@ impl<'a> EmailPlugin<'a> {
         failure_mode: Option<SendFailureMode>,
     ) -> ApiResponse<SendResult> {
         if let Err(e) = self.ensure_oauth_fresh(now_ts) {
-            return ApiResponse { ok: false, data: None, error: Some(e) };
+            return ApiResponse {
+                ok: false,
+                data: None,
+                error: Some(e),
+            };
         }
 
         let claimed = match self.repo.claim_outbox_for_send(outbox_id, now_ts) {
@@ -689,7 +757,10 @@ impl<'a> EmailPlugin<'a> {
             };
             return fail(
                 ErrorCode::Validation,
-                &format!("outbox_not_claimable status={} next_attempt_at={}", latest.status, latest.next_attempt_at),
+                &format!(
+                    "outbox_not_claimable status={} next_attempt_at={}",
+                    latest.status, latest.next_attempt_at
+                ),
             );
         }
 
@@ -721,7 +792,10 @@ impl<'a> EmailPlugin<'a> {
                         provider_message_id: Some(provider_message_id),
                         next_attempt_at: now_ts,
                     }),
-                    Ok(false) => fail(ErrorCode::Validation, "outbox_state_changed_before_finalize"),
+                    Ok(false) => fail(
+                        ErrorCode::Validation,
+                        "outbox_state_changed_before_finalize",
+                    ),
                     Err(e) => fail(ErrorCode::Storage, &e.to_string()),
                 }
             }
@@ -781,7 +855,10 @@ impl<'a> EmailPlugin<'a> {
                             message: provider_err.message,
                         }),
                     },
-                    Ok(false) => fail(ErrorCode::Validation, "outbox_state_changed_before_finalize"),
+                    Ok(false) => fail(
+                        ErrorCode::Validation,
+                        "outbox_state_changed_before_finalize",
+                    ),
                     Err(e) => fail(ErrorCode::Storage, &e.to_string()),
                 }
             }
@@ -799,7 +876,11 @@ impl<'a> EmailPlugin<'a> {
                 SendFailureMode::Network => "simulated network timeout".to_string(),
                 SendFailureMode::Provider => "simulated provider rejection".to_string(),
             };
-            return Err(ProviderError { mode, message, debug_message: "simulated failure".to_string() });
+            return Err(ProviderError {
+                mode,
+                message,
+                debug_message: "simulated failure".to_string(),
+            });
         }
 
         let cfg_guard = self.config.borrow();
@@ -809,16 +890,22 @@ impl<'a> EmailPlugin<'a> {
             debug_message: "smtp transport config is None".to_string(),
         })?;
 
-        let from = Mailbox::new(None, cfg.smtp.user.parse().map_err(|e| ProviderError {
-            mode: SendFailureMode::Provider,
-            message: "invalid smtp sender address".to_string(),
-            debug_message: format!("invalid smtp user address: {e}"),
-        })?);
-        let to = Mailbox::new(None, outbox.to_recipients.parse().map_err(|e| ProviderError {
-            mode: SendFailureMode::Provider,
-            message: "invalid recipient address".to_string(),
-            debug_message: format!("invalid recipient address: {e}"),
-        })?);
+        let from = Mailbox::new(
+            None,
+            cfg.smtp.user.parse().map_err(|e| ProviderError {
+                mode: SendFailureMode::Provider,
+                message: "invalid smtp sender address".to_string(),
+                debug_message: format!("invalid smtp user address: {e}"),
+            })?,
+        );
+        let to = Mailbox::new(
+            None,
+            outbox.to_recipients.parse().map_err(|e| ProviderError {
+                mode: SendFailureMode::Provider,
+                message: "invalid recipient address".to_string(),
+                debug_message: format!("invalid recipient address: {e}"),
+            })?,
+        );
 
         let idempotency_key = build_outbox_idempotency_key(outbox);
         let mut msg_builder = SmtpMessage::builder()
@@ -829,7 +916,8 @@ impl<'a> EmailPlugin<'a> {
         if let Some(in_reply_to) = &outbox.in_reply_to_message_id {
             msg_builder = msg_builder.in_reply_to(in_reply_to.clone());
             if let Ok(Some(parent)) = self.repo.get_message(outbox.account_id, in_reply_to) {
-                let references = build_references_chain(parent.references_header.as_deref(), &parent.message_id);
+                let references =
+                    build_references_chain(parent.references_header.as_deref(), &parent.message_id);
                 if !references.is_empty() {
                     msg_builder = msg_builder.references(references);
                 }
@@ -862,7 +950,8 @@ impl<'a> EmailPlugin<'a> {
             .port(cfg.smtp.port);
         match (&cfg.smtp.auth.password, &cfg.smtp.auth.oauth_token) {
             (Some(password), None) => {
-                builder = builder.credentials(Credentials::new(cfg.smtp.user.clone(), password.clone()));
+                builder =
+                    builder.credentials(Credentials::new(cfg.smtp.user.clone(), password.clone()));
             }
             (None, Some(token)) => {
                 builder = builder
@@ -893,7 +982,10 @@ impl<'a> EmailPlugin<'a> {
             Some(true) => Ok(()),
             Some(false) => Err(ApiError {
                 code: ErrorCode::FeatureDisabled,
-                message: format!("feature '{}' is disabled for account {}", feature_key, account_id),
+                message: format!(
+                    "feature '{}' is disabled for account {}",
+                    feature_key, account_id
+                ),
             }),
             None => Err(ApiError {
                 code: ErrorCode::Validation,
@@ -904,7 +996,9 @@ impl<'a> EmailPlugin<'a> {
 
     fn ensure_oauth_fresh(&self, now_ts: i64) -> Result<(), ApiError> {
         let mut cfg_guard = self.config.borrow_mut();
-        let Some(cfg) = cfg_guard.as_mut() else { return Ok(()); };
+        let Some(cfg) = cfg_guard.as_mut() else {
+            return Ok(());
+        };
         refresh_protocol_token(
             "imap",
             &cfg.imap.user,
@@ -980,7 +1074,10 @@ struct ProviderError {
     debug_message: String,
 }
 
-fn read_attachment_bytes(input: &AttachmentInput, cfg: &EmailTransportConfig) -> Result<Vec<u8>, ProviderError> {
+fn read_attachment_bytes(
+    input: &AttachmentInput,
+    cfg: &EmailTransportConfig,
+) -> Result<Vec<u8>, ProviderError> {
     enforce_attachment_policy(&cfg.attachment_policy, &input.content_type, 0)?;
     let bytes = match (&input.base64, &input.path) {
         (Some(b64), None) => base64::engine::general_purpose::STANDARD
@@ -999,7 +1096,7 @@ fn read_attachment_bytes(input: &AttachmentInput, cfg: &EmailTransportConfig) ->
                 mode: SendFailureMode::Provider,
                 message: "attachment requires exactly one of base64 or path".to_string(),
                 debug_message: "attachment input has both/none of base64/path".to_string(),
-            })
+            });
         }
     };
     enforce_attachment_policy(&cfg.attachment_policy, &input.content_type, bytes.len())?;
@@ -1066,7 +1163,11 @@ fn parse_mime_message(
     let snippet = body_text
         .as_ref()
         .map(|v| v.chars().take(120).collect::<String>())
-        .or_else(|| body_html.as_ref().map(|v| v.chars().take(120).collect::<String>()));
+        .or_else(|| {
+            body_html
+                .as_ref()
+                .map(|v| v.chars().take(120).collect::<String>())
+        });
 
     let message_id = message
         .message_id()
@@ -1078,9 +1179,13 @@ fn parse_mime_message(
         .enumerate()
         .map(|(idx, part)| {
             let filename = part.attachment_name().map(|n| n.to_string());
-            let content_type = part
-                .content_type()
-                .map(|c| format!("{}/{}", c.c_type, c.c_subtype.clone().unwrap_or_else(|| "octet-stream".into())));
+            let content_type = part.content_type().map(|c| {
+                format!(
+                    "{}/{}",
+                    c.c_type,
+                    c.c_subtype.clone().unwrap_or_else(|| "octet-stream".into())
+                )
+            });
             let local_path = persist_attachment(
                 attachment_store,
                 attachment_policy,
@@ -1174,7 +1279,12 @@ fn persist_attachment(
         return None;
     }
 
-    enforce_attachment_policy(policy, content_type.unwrap_or("application/octet-stream"), bytes.len()).ok()?;
+    enforce_attachment_policy(
+        policy,
+        content_type.unwrap_or("application/octet-stream"),
+        bytes.len(),
+    )
+    .ok()?;
 
     let root = Path::new(&cfg.dir);
     let safe_message_id = sanitize_path_component(message_id);
@@ -1221,7 +1331,11 @@ fn safe_resolve_under_root(root: &Path, candidate: &Path) -> Result<PathBuf, Pro
         return Err(ProviderError {
             mode: SendFailureMode::Provider,
             message: "attachment path escapes storage root".to_string(),
-            debug_message: format!("root={} candidate={}", root_abs.display(), normalized.display()),
+            debug_message: format!(
+                "root={} candidate={}",
+                root_abs.display(),
+                normalized.display()
+            ),
         });
     }
     Ok(normalized)
@@ -1292,7 +1406,10 @@ fn sanitize_limit(limit: i64) -> Result<i64, ApiError> {
     if !(MIN_LIST_LIMIT..=MAX_LIST_LIMIT).contains(&limit) {
         return Err(ApiError {
             code: ErrorCode::Validation,
-            message: format!("limit_out_of_range:{} (expected {}..={})", limit, MIN_LIST_LIMIT, MAX_LIST_LIMIT),
+            message: format!(
+                "limit_out_of_range:{} (expected {}..={})",
+                limit, MIN_LIST_LIMIT, MAX_LIST_LIMIT
+            ),
         });
     }
     Ok(limit)
@@ -1378,9 +1495,14 @@ fn network_err_provider(e: impl std::fmt::Display) -> ProviderError {
 
 fn validate_transport_config(cfg: &EmailTransportConfig) -> Result<(), ApiError> {
     if cfg.imap.host.trim().is_empty() || cfg.smtp.host.trim().is_empty() {
-        return Err(ApiError { code: ErrorCode::Validation, message: "imap/smtp host is required".to_string() });
+        return Err(ApiError {
+            code: ErrorCode::Validation,
+            message: "imap/smtp host is required".to_string(),
+        });
     }
-    if cfg.attachment_policy.max_size_bytes == 0 || cfg.attachment_policy.allowed_content_types.is_empty() {
+    if cfg.attachment_policy.max_size_bytes == 0
+        || cfg.attachment_policy.allowed_content_types.is_empty()
+    {
         return Err(ApiError {
             code: ErrorCode::Validation,
             message: "attachment policy must define max size and allowed types".to_string(),
@@ -1393,11 +1515,17 @@ fn validate_transport_config(cfg: &EmailTransportConfig) -> Result<(), ApiError>
 
 fn validate_auth_config(protocol: &str, user: &str, auth: &AuthConfig) -> Result<(), ApiError> {
     if user.trim().is_empty() {
-        return Err(ApiError { code: ErrorCode::Validation, message: format!("{protocol}.user is required") });
+        return Err(ApiError {
+            code: ErrorCode::Validation,
+            message: format!("{protocol}.user is required"),
+        });
     }
     match (&auth.password, &auth.oauth_token) {
         (Some(_), None) | (None, Some(_)) => Ok(()),
-        _ => Err(ApiError { code: ErrorCode::Validation, message: format!("{protocol}.auth must set exactly one of password/oauth_token") }),
+        _ => Err(ApiError {
+            code: ErrorCode::Validation,
+            message: format!("{protocol}.auth must set exactly one of password/oauth_token"),
+        }),
     }
 }
 
@@ -1451,8 +1579,8 @@ fn log_debug(context: &str, details: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_references_chain, parse_mime_message, AttachmentPolicy, ListMessagesRequest,
-        ReplyEmailRequest, SearchMessagesRequest,
+        AttachmentPolicy, ListMessagesRequest, ReplyEmailRequest, SearchMessagesRequest,
+        build_references_chain, parse_mime_message,
     };
     use crate::db::{EmailRepository, EmailStore, NewAccount, NewMessage};
     use crate::plugin::EmailPlugin;
@@ -1460,7 +1588,8 @@ mod tests {
     #[test]
     fn parse_mime_extracts_text_html_and_attachments() {
         let raw = b"From: Alice <alice@example.com>\r\nTo: Bob <bob@example.com>\r\nSubject: Hello\r\nMessage-ID: <m1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=abc\r\n\r\n--abc\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nPlain body\r\n--abc\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body>HTML body</body></html>\r\n--abc\r\nContent-Type: text/plain; name=file.txt\r\nContent-Disposition: attachment; filename=file.txt\r\n\r\nhello\r\n--abc--\r\n";
-        let parsed = parse_mime_message(raw, None, &AttachmentPolicy::default(), 1, 1).expect("parse");
+        let parsed =
+            parse_mime_message(raw, None, &AttachmentPolicy::default(), 1, 1).expect("parse");
         assert_eq!(parsed.body_text.as_deref(), Some("Plain body"));
         assert!(parsed.body_html.is_some());
         assert_eq!(parsed.attachments.len(), 1);
@@ -1522,7 +1651,10 @@ mod tests {
             .get_outbox(res.data.expect("has state").outbox_id)
             .expect("get")
             .expect("exists");
-        assert_eq!(outbox.in_reply_to_message_id.as_deref(), Some("<root@example.com>"));
+        assert_eq!(
+            outbox.in_reply_to_message_id.as_deref(),
+            Some("<root@example.com>")
+        );
     }
 
     #[test]
@@ -1531,8 +1663,10 @@ mod tests {
         let raw_b = b"From: b@example.com\r\nSubject: B\r\n\r\nworld";
         assert_eq!(raw_a.len(), raw_b.len());
 
-        let parsed_a = parse_mime_message(raw_a, None, &AttachmentPolicy::default(), 9, 100).expect("a");
-        let parsed_b = parse_mime_message(raw_b, None, &AttachmentPolicy::default(), 9, 100).expect("b");
+        let parsed_a =
+            parse_mime_message(raw_a, None, &AttachmentPolicy::default(), 9, 100).expect("a");
+        let parsed_b =
+            parse_mime_message(raw_b, None, &AttachmentPolicy::default(), 9, 100).expect("b");
 
         assert!(parsed_a.message_id.starts_with("generated-9-100-"));
         assert!(parsed_b.message_id.starts_with("generated-9-100-"));
@@ -1558,7 +1692,10 @@ mod tests {
         let plugin = EmailPlugin::new(repo);
 
         let list_err = plugin
-            .list(ListMessagesRequest { account_id, limit: 0 })
+            .list(ListMessagesRequest {
+                account_id,
+                limit: 0,
+            })
             .expect_err("list limit should fail");
         assert_eq!(list_err.code, super::ErrorCode::Validation);
 

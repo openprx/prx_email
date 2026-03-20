@@ -95,7 +95,10 @@ fn ensure_column(
         .any(|name| name == column);
 
     if !exists {
-        let alter = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_sql_type);
+        let alter = format!(
+            "ALTER TABLE {} ADD COLUMN {} {}",
+            table, column, column_sql_type
+        );
         conn.execute_batch(&alter)?;
     }
     Ok(())

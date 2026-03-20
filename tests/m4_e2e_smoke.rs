@@ -1,7 +1,7 @@
 use prx_email::db::{EmailRepository, EmailStore, NewAccount};
 use prx_email::plugin::{
-    AttachmentPolicy, AuthConfig, EmailPlugin, EmailTransportConfig, ImapConfig,
-    ReplyEmailRequest, SendEmailRequest, SmtpConfig, SyncRequest,
+    AttachmentPolicy, AuthConfig, EmailPlugin, EmailTransportConfig, ImapConfig, ReplyEmailRequest,
+    SendEmailRequest, SmtpConfig, SyncRequest,
 };
 
 #[test]
@@ -20,7 +20,10 @@ fn e2e_sync_send_reply_smoke() {
     let user = std::env::var("E2E_EMAIL_USER").expect("E2E_EMAIL_USER");
     let password = std::env::var("E2E_EMAIL_PASS").ok();
     let oauth_token = std::env::var("E2E_OAUTH_TOKEN").ok();
-    assert!(password.is_some() ^ oauth_token.is_some(), "set exactly one of E2E_EMAIL_PASS / E2E_OAUTH_TOKEN");
+    assert!(
+        password.is_some() ^ oauth_token.is_some(),
+        "set exactly one of E2E_EMAIL_PASS / E2E_OAUTH_TOKEN"
+    );
     let target = std::env::var("E2E_TARGET_EMAIL").unwrap_or_else(|_| user.clone());
 
     let now = 1_800_000_000i64;

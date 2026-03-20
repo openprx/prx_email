@@ -348,32 +348,40 @@ fn staged_rollout_percentage_enablement_regression() {
     let account_id = create_account(&repo, "rollout@example.com", 1);
     let plugin = EmailPlugin::new(repo);
 
-    assert!(!plugin
-        .is_feature_enabled(account_id, FEATURE_EMAIL_SEND)
-        .expect("feature state"));
+    assert!(
+        !plugin
+            .is_feature_enabled(account_id, FEATURE_EMAIL_SEND)
+            .expect("feature state")
+    );
 
     let enabled_0 = plugin
         .apply_percentage_rollout(account_id, FEATURE_EMAIL_SEND, 0, 20)
         .expect("apply rollout 0");
     assert!(!enabled_0);
-    assert!(!plugin
-        .is_feature_enabled(account_id, FEATURE_EMAIL_SEND)
-        .expect("feature state after 0"));
+    assert!(
+        !plugin
+            .is_feature_enabled(account_id, FEATURE_EMAIL_SEND)
+            .expect("feature state after 0")
+    );
 
     let enabled_100 = plugin
         .apply_percentage_rollout(account_id, FEATURE_EMAIL_SEND, 100, 21)
         .expect("apply rollout 100");
     assert!(enabled_100);
-    assert!(plugin
-        .is_feature_enabled(account_id, FEATURE_EMAIL_SEND)
-        .expect("feature state after 100"));
+    assert!(
+        plugin
+            .is_feature_enabled(account_id, FEATURE_EMAIL_SEND)
+            .expect("feature state after 100")
+    );
 
     plugin
         .set_feature_default(FEATURE_EMAIL_REPLY, true, 22)
         .expect("set feature default");
-    assert!(plugin
-        .is_feature_enabled(account_id, FEATURE_EMAIL_REPLY)
-        .expect("reply state"));
+    assert!(
+        plugin
+            .is_feature_enabled(account_id, FEATURE_EMAIL_REPLY)
+            .expect("reply state")
+    );
 }
 
 fn create_account(repo: &EmailRepository<'_>, email: &str, now_ts: i64) -> i64 {

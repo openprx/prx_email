@@ -1,4 +1,4 @@
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
 
 use super::{
@@ -37,7 +37,11 @@ impl<'a> EmailRepository<'a> {
         Ok(self.store.conn().last_insert_rowid())
     }
 
-    pub fn get_folder_by_path(&self, account_id: i64, path: &str) -> Result<Option<Folder>, RepoError> {
+    pub fn get_folder_by_path(
+        &self,
+        account_id: i64,
+        path: &str,
+    ) -> Result<Option<Folder>, RepoError> {
         let result = self
             .store
             .conn()
@@ -497,11 +501,7 @@ fn map_outbox(r: &rusqlite::Row<'_>) -> Result<OutboxMessage, rusqlite::Error> {
 }
 
 fn bool_to_i64(value: bool) -> i64 {
-    if value {
-        1
-    } else {
-        0
-    }
+    if value { 1 } else { 0 }
 }
 
 fn i64_to_bool(value: i64) -> bool {
