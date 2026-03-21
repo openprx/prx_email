@@ -1,2 +1,6 @@
 # Local OAuth bootstrap outputs
 outlook_oauth.local.env
+
+# Build artifacts
+.brv/
+target/
