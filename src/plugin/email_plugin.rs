@@ -1088,7 +1088,13 @@ fn read_attachment_bytes(
                 let resolved = safe_resolve_under_root(Path::new(&store.dir), Path::new(path))?;
                 fs::read(resolved).map_err(network_err_provider)?
             } else {
-                fs::read(path).map_err(network_err_provider)?
+                return Err(ProviderError {
+                    mode: SendFailureMode::Provider,
+                    message: "attachment store not configured; path-based attachments disabled"
+                        .to_string(),
+                    debug_message: "no attachment_store config, refusing fs::read on raw path"
+                        .to_string(),
+                });
             }
         }
         _ => {
@@ -1320,12 +1326,17 @@ fn enforce_attachment_policy(
 }
 
 fn safe_resolve_under_root(root: &Path, candidate: &Path) -> Result<PathBuf, ProviderError> {
-    let root_abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root_abs = root.canonicalize().map_err(|e| ProviderError {
+        mode: SendFailureMode::Provider,
+        message: "cannot resolve attachment storage root".to_string(),
+        debug_message: format!("canonicalize root failed: {e}"),
+    })?;
     let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
     } else {
         root_abs.join(candidate)
     };
+    // First do lexical normalization to strip obvious `..` traversals
     let normalized = normalize_path(&joined);
     if !normalized.starts_with(&root_abs) {
         return Err(ProviderError {
@@ -1338,7 +1349,25 @@ fn safe_resolve_under_root(root: &Path, candidate: &Path) -> Result<PathBuf, Pro
             ),
         });
     }
-    Ok(normalized)
+    // Then canonicalize the final path to resolve symlinks and verify it still
+    // resides under root — this prevents symlink-based escapes.
+    let resolved = normalized.canonicalize().map_err(|e| ProviderError {
+        mode: SendFailureMode::Provider,
+        message: "cannot resolve attachment path".to_string(),
+        debug_message: format!("canonicalize failed: {e}"),
+    })?;
+    if !resolved.starts_with(&root_abs) {
+        return Err(ProviderError {
+            mode: SendFailureMode::Provider,
+            message: "attachment path escapes storage root via symlink".to_string(),
+            debug_message: format!(
+                "root={} resolved={}",
+                root_abs.display(),
+                resolved.display()
+            ),
+        });
+    }
+    Ok(resolved)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

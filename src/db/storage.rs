@@ -80,12 +80,60 @@ impl EmailStore {
     }
 }
 
+/// Validate that a string is a safe SQL identifier (table/column name).
+/// Allows only ASCII letters, digits, and underscores; must start with a
+/// letter or underscore. Returns `Err` for anything else to prevent SQL injection.
+fn validate_sql_identifier(name: &str) -> Result<(), StorageError> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(StorageError::Sqlite(rusqlite::Error::InvalidParameterName(
+            format!("invalid SQL identifier length: {}", name.len()),
+        )));
+    }
+    let first = name.as_bytes()[0];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return Err(StorageError::Sqlite(rusqlite::Error::InvalidParameterName(
+            format!("SQL identifier must start with letter or underscore: {name}"),
+        )));
+    }
+    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(StorageError::Sqlite(rusqlite::Error::InvalidParameterName(
+            format!("SQL identifier contains invalid characters: {name}"),
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a SQL type token — must only contain safe ASCII characters
+/// (letters, digits, underscores, spaces, parentheses). No semicolons,
+/// quotes, or comment markers allowed.
+fn validate_sql_type(type_str: &str) -> Result<(), StorageError> {
+    if type_str.is_empty() || type_str.len() > 64 {
+        return Err(StorageError::Sqlite(rusqlite::Error::InvalidParameterName(
+            format!("invalid SQL type length: {}", type_str.len()),
+        )));
+    }
+    if !type_str
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b' ' || b == b'(' || b == b')')
+    {
+        return Err(StorageError::Sqlite(rusqlite::Error::InvalidParameterName(
+            format!("SQL type contains invalid characters: {type_str}"),
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_column(
     conn: &Connection,
     table: &str,
     column: &str,
     column_sql_type: &str,
 ) -> Result<(), StorageError> {
+    // Validate identifiers/types to prevent SQL injection via format!
+    validate_sql_identifier(table)?;
+    validate_sql_identifier(column)?;
+    validate_sql_type(column_sql_type)?;
+
     let pragma = format!("PRAGMA table_info({})", table);
     let mut stmt = conn.prepare(&pragma)?;
     let exists = stmt
