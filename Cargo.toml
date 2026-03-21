@@ -2,8 +2,10 @@
 name = "prx_email"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
-description = "SQLite-only M1 foundation for PRX Email"
+authors = ["g1e2x87"]
+license = "MIT OR Apache-2.0"
+description = "Self-hosted email client with IMAP/SMTP and OAuth support"
+repository = "https://github.com/openprx/prx_email"
 
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
