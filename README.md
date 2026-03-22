@@ -93,6 +93,11 @@ Notes:
 - Optional dry-run (URL only): `./scripts/outlook_oauth_bootstrap.sh --dry-run`
 - Never commit generated token files
 
+## Links
+
+- [Documentation](https://docs.openprx.dev/en/prx-email/) — Full documentation (10 languages)
+- [Community](https://community.openprx.dev) — OpenPRX community forum
+
 ## Operations docs
 
 - [Operations Runbook](docs/operations_runbook.md)
