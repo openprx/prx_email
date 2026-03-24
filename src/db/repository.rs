@@ -2,8 +2,8 @@ use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
 
 use super::{
-    Account, EmailStore, FeatureFlag, Folder, Message, NewAccount, NewFolder, NewMessage,
-    NewOutboxMessage, OutboxMessage, SyncState, UpdateOutboxStatus, UpsertSyncState,
+    Account, EmailStore, FeatureFlag, Folder, Message, NewAccount, NewFolder, NewMessage, NewOutboxMessage,
+    OutboxMessage, SyncState, UpdateOutboxStatus, UpsertSyncState,
 };
 
 #[derive(Debug, Error)]
@@ -37,11 +37,7 @@ impl<'a> EmailRepository<'a> {
         Ok(self.store.conn().last_insert_rowid())
     }
 
-    pub fn get_folder_by_path(
-        &self,
-        account_id: i64,
-        path: &str,
-    ) -> Result<Option<Folder>, RepoError> {
+    pub fn get_folder_by_path(&self, account_id: i64, path: &str) -> Result<Option<Folder>, RepoError> {
         let result = self
             .store
             .conn()
@@ -116,11 +112,7 @@ impl<'a> EmailRepository<'a> {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn get_message(
-        &self,
-        account_id: i64,
-        message_id: &str,
-    ) -> Result<Option<Message>, RepoError> {
+    pub fn get_message(&self, account_id: i64, message_id: &str) -> Result<Option<Message>, RepoError> {
         let result = self
             .store
             .conn()
@@ -134,12 +126,7 @@ impl<'a> EmailRepository<'a> {
         Ok(result)
     }
 
-    pub fn search_messages(
-        &self,
-        account_id: i64,
-        query: &str,
-        limit: i64,
-    ) -> Result<Vec<Message>, RepoError> {
+    pub fn search_messages(&self, account_id: i64, query: &str, limit: i64) -> Result<Vec<Message>, RepoError> {
         let like = format!("%{}%", query);
         let mut stmt = self.store.conn().prepare(
             "SELECT id, account_id, folder_id, message_id, subject, sender, recipients, snippet, body_text, body_html, attachments_json, references_header, received_at, created_at, updated_at
@@ -178,11 +165,7 @@ impl<'a> EmailRepository<'a> {
         Ok(id)
     }
 
-    pub fn get_sync_state(
-        &self,
-        account_id: i64,
-        folder_id: Option<i64>,
-    ) -> Result<Option<SyncState>, RepoError> {
+    pub fn get_sync_state(&self, account_id: i64, folder_id: Option<i64>) -> Result<Option<SyncState>, RepoError> {
         let result = self
             .store
             .conn()
@@ -342,12 +325,7 @@ impl<'a> EmailRepository<'a> {
         Ok(affected == 1)
     }
 
-    pub fn set_feature_default(
-        &self,
-        feature_key: &str,
-        enabled: bool,
-        now_ts: i64,
-    ) -> Result<(), RepoError> {
+    pub fn set_feature_default(&self, feature_key: &str, enabled: bool, now_ts: i64) -> Result<(), RepoError> {
         self.store.conn().execute(
             "UPDATE feature_flags SET default_enabled = ?2, updated_at = ?3 WHERE key = ?1",
             params![feature_key, bool_to_i64(enabled), now_ts],
@@ -412,11 +390,7 @@ impl<'a> EmailRepository<'a> {
         Ok(())
     }
 
-    pub fn clear_account_feature_flag(
-        &self,
-        account_id: i64,
-        feature_key: &str,
-    ) -> Result<(), RepoError> {
+    pub fn clear_account_feature_flag(&self, account_id: i64, feature_key: &str) -> Result<(), RepoError> {
         self.store.conn().execute(
             "DELETE FROM account_feature_flags WHERE account_id = ?1 AND feature_key = ?2",
             params![account_id, feature_key],
@@ -424,11 +398,7 @@ impl<'a> EmailRepository<'a> {
         Ok(())
     }
 
-    pub fn is_feature_enabled(
-        &self,
-        account_id: i64,
-        feature_key: &str,
-    ) -> Result<Option<bool>, RepoError> {
+    pub fn is_feature_enabled(&self, account_id: i64, feature_key: &str) -> Result<Option<bool>, RepoError> {
         let result = self
             .store
             .conn()

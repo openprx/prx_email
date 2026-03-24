@@ -1,7 +1,7 @@
 use prx_email::db::{EmailRepository, EmailStore, NewAccount, NewMessage};
 use prx_email::plugin::{
-    EmailPlugin, ErrorCode, GetMessageRequest, ListMessagesRequest, ReplyEmailRequest,
-    RetryOutboxRequest, SearchMessagesRequest, SendEmailRequest, SendFailureMode,
+    EmailPlugin, ErrorCode, GetMessageRequest, ListMessagesRequest, ReplyEmailRequest, RetryOutboxRequest,
+    SearchMessagesRequest, SendEmailRequest, SendFailureMode,
 };
 use tempfile::NamedTempFile;
 
@@ -208,10 +208,7 @@ fn send_reply_regression_with_safe_defaults_and_enablement() {
         .get_outbox(reply_data.outbox_id)
         .expect("get reply outbox")
         .expect("exists");
-    assert_eq!(
-        reply_outbox.in_reply_to_message_id.as_deref(),
-        Some("remote-1")
-    );
+    assert_eq!(reply_outbox.in_reply_to_message_id.as_deref(), Some("remote-1"));
     assert_eq!(reply_outbox.to_recipients, "bob@example.com");
 }
 
@@ -237,10 +234,7 @@ fn outbox_retry_and_failure_recovery_regression() {
         failure_mode: Some(SendFailureMode::Network),
     });
     assert!(!first.ok);
-    assert_eq!(
-        first.error.as_ref().map(|e| &e.code),
-        Some(&ErrorCode::Network)
-    );
+    assert_eq!(first.error.as_ref().map(|e| &e.code), Some(&ErrorCode::Network));
     let first_state = first.data.expect("first state");
     assert_eq!(first_state.status, "failed");
     assert_eq!(first_state.retries, 1);
@@ -277,10 +271,7 @@ fn outbox_retry_and_failure_recovery_regression() {
         failure_mode: Some(SendFailureMode::Provider),
     });
     assert!(!second.ok);
-    assert_eq!(
-        second.error.as_ref().map(|e| &e.code),
-        Some(&ErrorCode::Provider)
-    );
+    assert_eq!(second.error.as_ref().map(|e| &e.code), Some(&ErrorCode::Provider));
     let second_state = second.data.expect("second state");
     assert_eq!(second_state.status, "failed");
     assert_eq!(second_state.retries, 2);

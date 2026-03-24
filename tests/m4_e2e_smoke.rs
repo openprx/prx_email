@@ -1,7 +1,7 @@
 use prx_email::db::{EmailRepository, EmailStore, NewAccount};
 use prx_email::plugin::{
-    AttachmentPolicy, AuthConfig, EmailPlugin, EmailTransportConfig, ImapConfig, ReplyEmailRequest,
-    SendEmailRequest, SmtpConfig, SyncRequest,
+    AttachmentPolicy, AuthConfig, EmailPlugin, EmailTransportConfig, ImapConfig, ReplyEmailRequest, SendEmailRequest,
+    SmtpConfig, SyncRequest,
 };
 
 #[test]
@@ -54,10 +54,7 @@ fn e2e_sync_send_reply_smoke() {
                 host: smtp_host,
                 port: smtp_port,
                 user: user.clone(),
-                auth: AuthConfig {
-                    password,
-                    oauth_token,
-                },
+                auth: AuthConfig { password, oauth_token },
             },
             attachment_store: None,
             attachment_policy: AttachmentPolicy::default(),
@@ -103,10 +100,7 @@ fn e2e_sync_send_reply_smoke() {
         .expect("sync sent");
 
     let parent = plugin
-        .list(prx_email::plugin::ListMessagesRequest {
-            account_id,
-            limit: 20,
-        })
+        .list(prx_email::plugin::ListMessagesRequest { account_id, limit: 20 })
         .expect("list")
         .into_iter()
         .find(|m| m.sender.as_deref() == Some(user.as_str()))
